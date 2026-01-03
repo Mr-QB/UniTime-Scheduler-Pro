@@ -1,5 +1,6 @@
 
 import React, { useState, useCallback, useMemo, useEffect } from 'react';
+import * as XLSX from 'xlsx';
 import { 
   LayoutDashboard as IconDashboard,
   ShieldCheck as IconShield,
@@ -21,7 +22,8 @@ import {
   BarChart3,
   Clock,
   AlertOctagon,
-  Key
+  Key,
+  Download
 } from 'lucide-react';
 import { CourseData, RoomData } from './types';
 import TimetableGrid from './components/TimetableGrid';
@@ -30,8 +32,6 @@ import OccupancyMap from './components/OccupancyMap';
 import FileUploader from './components/FileUploader';
 import { analyzeSchedule, AISolveMode } from './services/geminiService';
 import { validateAISuggestions, normalizeDay, getStartPeriod } from './utils/validator';
-
-// Removed custom Window/aistudio declaration as AIStudio type is pre-defined in the environment.
 
 const App: React.FC = () => {
   const [courses, setCourses] = useState<CourseData[]>([]);
@@ -45,6 +45,7 @@ const App: React.FC = () => {
   
   const [maxFillIters, setMaxFillIters] = useState(15);
   const [maxRepairIters, setMaxRepairIters] = useState(8);
+  const [quotaWaitTime, setQuotaWaitTime] = useState(30); 
   const [iteration, setIteration] = useState(0);
   const [quotaCountdown, setQuotaCountdown] = useState(0);
   const [hasApiKey, setHasApiKey] = useState<boolean>(false);
@@ -52,10 +53,8 @@ const App: React.FC = () => {
   const isDataReady = courses.length > 0 && rooms.length > 0;
   const TOTAL_SLOTS_PER_ROOM = 24;
 
-  // Kiểm tra API Key khi khởi chạy
   useEffect(() => {
     const checkKey = async () => {
-      // Using existing global aistudio definition
       if (window.aistudio) {
         const hasKey = await window.aistudio.hasSelectedApiKey();
         setHasApiKey(hasKey);
@@ -65,14 +64,12 @@ const App: React.FC = () => {
   }, []);
 
   const handleOpenKeySelector = async () => {
-    // Using existing global aistudio definition
     if (window.aistudio) {
       await window.aistudio.openSelectKey();
-      setHasApiKey(true); // Giả định thành công sau khi mở dialog
+      setHasApiKey(true);
     }
   };
 
-  // Countdown timer effect
   useEffect(() => {
     let timer: any;
     if (quotaCountdown > 0) {
@@ -120,10 +117,34 @@ const App: React.FC = () => {
 
   const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
+  const exportToExcel = () => {
+    if (!validatedCourses.length) return;
+
+    const exportData = validatedCourses.map(c => ({
+      'STT': c.stt,
+      'Mã học phần': c.courseCode,
+      'Tên học phần': c.courseName,
+      'Số tín chỉ': c.credits,
+      'Mã lớp học phần': c.sectionCode,
+      'Giảng viên': c.lecturer,
+      'Số sinh viên': c.studentCount,
+      'Số đăng ký': c.registeredCount,
+      'Thứ': c.dayOfWeek,
+      'Tiết': c.period,
+      'Giảng đường': c.validationStatus === 'verified' ? (c.suggestedRoom || c.room) : '',
+      'Thời lượng': c.duration
+    }));
+
+    const worksheet = XLSX.utils.json_to_sheet(exportData);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Lịch giảng dạy");
+    
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    XLSX.writeFile(workbook, `ThoiKhoaBieu_UniTime_${timestamp}.xlsx`);
+  };
+
   const runTurboProcess = async () => {
     if (!isDataReady) return;
-    
-    // Yêu cầu cấu hình Key nếu chưa có
     if (!hasApiKey) {
       await handleOpenKeySelector();
     }
@@ -169,7 +190,7 @@ const App: React.FC = () => {
         const result = await analyzeSchedule(validState, rooms, mode, i);
         
         if (result.errorType === 'QUOTA') {
-          const waitTime = 30; 
+          const waitTime = quotaWaitTime; 
           setQuotaCountdown(waitTime);
           fullLog = `⏳ [QUOTA 429] Đang tạm nghỉ ${waitTime}s để hồi hạn mức API...\n` + fullLog;
           setAiAnalysis(fullLog);
@@ -179,7 +200,6 @@ const App: React.FC = () => {
           continue;
         }
 
-        // Xử lý lỗi Requested entity was not found
         if (result.report.includes("not found")) {
           fullLog = `⚠️ Lỗi xác thực Key. Vui lòng chọn lại Key...\n` + fullLog;
           setAiAnalysis(fullLog);
@@ -238,7 +258,6 @@ const App: React.FC = () => {
           </div>
           
           <div className="flex items-center gap-4">
-            {/* Nút API KEY */}
             <button 
               onClick={handleOpenKeySelector}
               className={`flex items-center gap-2 px-4 py-2 rounded-2xl border transition-all ${hasApiKey ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400' : 'bg-red-500/10 border-red-500/30 text-red-400 animate-pulse'}`}
@@ -260,15 +279,29 @@ const App: React.FC = () => {
             
             <div className="flex items-center gap-4 bg-white/5 px-4 py-2 rounded-2xl border border-white/10">
                <Settings2 className="w-4 h-4 text-slate-500" />
-               <div className="flex items-center gap-4">
+               <div className="flex items-center gap-6">
                   <div className="flex flex-col">
-                    <span className="text-[8px] font-black text-slate-500 uppercase tracking-widest text-center">Vòng lặp</span>
+                    <span className="text-[8px] font-black text-slate-500 uppercase tracking-widest text-center">Vòng lặp (F/R)</span>
                     <div className="flex gap-1 mt-1">
-                       <select value={maxFillIters} onChange={e => setMaxFillIters(Number(e.target.value))} disabled={isAnalyzing} className="bg-slate-800 text-[10px] font-bold p-1 rounded outline-none border-none">
-                         {[5,10,15,20,30].map(v => <option key={v} value={v}>{v}F</option>)}
+                       <select value={maxFillIters} onChange={e => setMaxFillIters(Number(e.target.value))} disabled={isAnalyzing} className="bg-slate-800 text-[10px] font-bold p-1 rounded outline-none border-none cursor-pointer">
+                         {[5,10,15,20,30].map(v => <option key={v} value={v}>{v}</option>)}
                        </select>
-                       <select value={maxRepairIters} onChange={e => setMaxRepairIters(Number(e.target.value))} disabled={isAnalyzing} className="bg-slate-800 text-[10px] font-bold p-1 rounded outline-none border-none">
-                         {[3,5,8,12,15].map(v => <option key={v} value={v}>{v}R</option>)}
+                       <select value={maxRepairIters} onChange={e => setMaxRepairIters(Number(e.target.value))} disabled={isAnalyzing} className="bg-slate-800 text-[10px] font-bold p-1 rounded outline-none border-none cursor-pointer">
+                         {[3,5,8,12,15].map(v => <option key={v} value={v}>{v}</option>)}
+                       </select>
+                    </div>
+                  </div>
+                  
+                  <div className="flex flex-col">
+                    <span className="text-[8px] font-black text-slate-500 uppercase tracking-widest text-center">Hồi Quota</span>
+                    <div className="flex mt-1">
+                       <select 
+                         value={quotaWaitTime} 
+                         onChange={e => setQuotaWaitTime(Number(e.target.value))} 
+                         disabled={isAnalyzing} 
+                         className="bg-slate-800 text-[10px] font-bold p-1 rounded outline-none border-none cursor-pointer"
+                       >
+                         {[0, 5, 10, 15, 20, 25, 30].map(v => <option key={v} value={v}>{v}s</option>)}
                        </select>
                     </div>
                   </div>
@@ -329,7 +362,21 @@ const App: React.FC = () => {
                   <TabButton active={activeTab === 'rooms'} onClick={() => setActiveTab('rooms')} icon={<Home className="w-4 h-4" />} label={`DS PHÒNG (${roomsWithSpace} PHÒNG CÒN CHỖ)`} />
                   <TabButton active={activeTab === 'occupancy'} onClick={() => setActiveTab('occupancy')} icon={<Grid3X3 className="w-4 h-4" />} label="BẢN ĐỒ CHIẾM DỤNG" />
                   <div className="flex-1" />
-                  <button onClick={() => {setCourses([]); setRooms([]); setAiAnalysis(null); setCourseFileName(null); setRoomFileName(null);}} className="px-6 flex items-center gap-2 text-[11px] font-black text-slate-400 hover:text-red-500 transition-colors uppercase tracking-widest"><Trash2 className="w-4 h-4"/> Xóa hết</button>
+                  <div className="flex items-center gap-2 px-4">
+                    <button 
+                      onClick={exportToExcel}
+                      disabled={!validatedCourses.length || isAnalyzing}
+                      className="px-6 flex items-center gap-2 text-[11px] font-black text-emerald-600 hover:text-emerald-700 disabled:opacity-30 disabled:hover:text-emerald-600 transition-colors uppercase tracking-widest border border-emerald-100 rounded-full py-2 bg-emerald-50/50"
+                    >
+                      <Download className="w-4 h-4"/> Xuất Excel
+                    </button>
+                    <button 
+                      onClick={() => {setCourses([]); setRooms([]); setAiAnalysis(null); setCourseFileName(null); setRoomFileName(null);}} 
+                      className="px-6 flex items-center gap-2 text-[11px] font-black text-slate-400 hover:text-red-500 transition-colors uppercase tracking-widest"
+                    >
+                      <Trash2 className="w-4 h-4"/> Xóa hết
+                    </button>
+                  </div>
                </div>
                <div className="flex-1 overflow-hidden">
                   {activeTab === 'schedule' && <TimetableGrid data={validatedCourses} />}
