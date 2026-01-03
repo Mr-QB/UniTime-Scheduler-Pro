@@ -1,0 +1,11 @@
+tunnel: db42a6dc-908a-4759-9461-7c1521d65735
+credentials-file: /etc/cloudflared/credentials.json
+
+ingress:
+  - hostname: atam.onlyfan.vn
+    service: http://proxy:3001
+  - service: http_status:404
+
+originRequest:
+  http2Origin: false
+  noTLSVerify: false
