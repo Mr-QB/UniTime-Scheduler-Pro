@@ -1,7 +1,6 @@
 
 import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import * as XLSX from 'xlsx';
-import ApiKeyModal from './components/ApiKeyModal';
 import {
   LayoutDashboard as IconDashboard,
   ShieldCheck as IconShield,
@@ -31,7 +30,7 @@ import TimetableGrid from './components/TimetableGrid';
 import RoomGrid from './components/RoomGrid';
 import OccupancyMap from './components/OccupancyMap';
 import FileUploader from './components/FileUploader';
-import { analyzeSchedule, AISolveMode } from './services/geminiService';
+import { scheduleWithHardcodedLogic } from './services/hardcodedScheduler';
 import { validateAISuggestions, normalizeDay, getStartPeriod } from './utils/validator';
 
 const App: React.FC = () => {
@@ -42,56 +41,16 @@ const App: React.FC = () => {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [aiAnalysis, setAiAnalysis] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'schedule' | 'rooms' | 'occupancy'>('schedule');
-  const [currentMode, setCurrentMode] = useState<AISolveMode | 'IDLE'>('IDLE');
+  const [currentMode, setCurrentMode] = useState<'FILLING' | 'IDLE'>('IDLE');
   
-  const [maxFillIters, setMaxFillIters] = useState(15);
-  const [maxRepairIters, setMaxRepairIters] = useState(8);
-  const [quotaWaitTime, setQuotaWaitTime] = useState(30); 
   const [iteration, setIteration] = useState(0);
-  const [quotaCountdown, setQuotaCountdown] = useState(0);
-  const [hasApiKey, setHasApiKey] = useState<boolean>(false);
-  const [apiKey, setApiKey] = useState<string>('');
-  const [isApiKeyModalOpen, setIsApiKeyModalOpen] = useState(false);
 
   const isDataReady = courses.length > 0 && rooms.length > 0;
   const TOTAL_SLOTS_PER_ROOM = 24;
 
   useEffect(() => {
-    const checkKey = async () => {
-      // Kiểm tra localStorage trước
-      const savedApiKey = localStorage.getItem('gemini_api_key');
-      if (savedApiKey) {
-        setApiKey(savedApiKey);
-        setHasApiKey(true);
-      } else if (window.aistudio) {
-        const hasKey = await window.aistudio.hasSelectedApiKey();
-        setHasApiKey(hasKey);
-      }
-    };
-    checkKey();
+    // Cleanup if needed
   }, []);
-
-  const handleOpenKeySelector = async () => {
-    if (window.aistudio) {
-      await window.aistudio.openSelectKey();
-      setHasApiKey(true);
-    }
-  };
-
-  const handleApiKeySubmit = (key: string) => {
-    localStorage.setItem('gemini_api_key', key);
-    setApiKey(key);
-    setHasApiKey(true);
-    setIsApiKeyModalOpen(false);
-  };
-
-  useEffect(() => {
-    let timer: any;
-    if (quotaCountdown > 0) {
-      timer = setInterval(() => setQuotaCountdown(prev => prev - 1), 1000);
-    }
-    return () => clearInterval(timer);
-  }, [quotaCountdown]);
 
   const validatedCourses = useMemo(() => {
     if (!isDataReady) return courses;
@@ -160,14 +119,10 @@ const App: React.FC = () => {
 
   const runTurboProcess = async () => {
     if (!isDataReady) return;
-    if (!hasApiKey) {
-      await handleOpenKeySelector();
-    }
 
     setIsAnalyzing(true);
-    setQuotaCountdown(0);
     let currentCourses = [...courses];
-    let fullLog = `🚀 KHỞI ĐỘNG TURBO ENGINE...\n`;
+    let fullLog = `� KHỞI ĐỘNG HARDCODED LOGIC ENGINE...\n`;
     setAiAnalysis(fullLog);
 
     const applySuggestions = (suggestions: {stt: any, room: string}[]) => {
@@ -186,95 +141,28 @@ const App: React.FC = () => {
       return { updated, changeCount };
     };
 
-    const processPhase = async (mode: AISolveMode, maxIters: number) => {
-      setCurrentMode(mode);
-      let consecutiveNoSuggestions = 0;
+    try {
+      setCurrentMode('FILLING');
+      setIteration(1);
       
-      for (let i = 1; i <= maxIters; i++) {
-        setIteration(i);
-        const validState = validateAISuggestions(currentCourses, rooms);
-        setCourses([...validState]);
+      const validState = validateAISuggestions(currentCourses, rooms);
+      setCourses([...validState]);
 
-        let hasTargets = false;
-        if (mode === 'FILLING') {
-          hasTargets = validState.some(c => (!c.room || c.room.toLowerCase() === 'null' || c.room.trim() === '') && !c.suggestedRoom);
-        } else {
-          // REPAIRING: tìm cả lỗi (violated) VÀ cơ hội tối ưu (có thể di chuyển sang phòng tốt hơn)
-          // Tính toán utilization để tìm phòng quá tải
-          const roomUsage = new Map<string, number>();
-          validState.forEach(c => {
-            const r = (c.suggestedRoom || c.room || "").trim().toLowerCase();
-            if (r && r !== "null" && r !== "") {
-              roomUsage.set(r, (roomUsage.get(r) || 0) + 1);
-            }
-          });
-          
-          // Có target nếu: có lỗi HOẶC có phòng quá tải (>6 slot chiếm)
-          hasTargets = validState.some(c => c.suggestedRoom && c.validationStatus === 'violated') ||
-                       Array.from(roomUsage.values()).some(usage => usage > 6);
-        }
-        
-        if (!hasTargets) {
-          fullLog = `⚠️ Hoàn tất ${mode}. Không có target còn lại.\n` + fullLog;
-          setAiAnalysis(fullLog);
-          break;
-        }
+      // Run hardcoded scheduler
+      const result = scheduleWithHardcodedLogic(validState, rooms);
 
-        const result = await analyzeSchedule(validState, rooms, mode, i, apiKey);
-        
-        if (result.errorType === 'QUOTA') {
-          const waitTime = quotaWaitTime; 
-          setQuotaCountdown(waitTime);
-          fullLog = `⏳ [QUOTA 429] Đang tạm nghỉ ${waitTime}s để hồi hạn mức API...\n` + fullLog;
-          setAiAnalysis(fullLog);
-          await sleep(waitTime * 1000);
-          setQuotaCountdown(0);
-          i--; 
-          continue;
-        }
-
-        if (result.report.includes("not found")) {
-          fullLog = `⚠️ Lỗi xác thực Key. Vui lòng chọn lại Key...\n` + fullLog;
-          setAiAnalysis(fullLog);
-          setHasApiKey(false);
-          await handleOpenKeySelector();
-          i--;
-          continue;
-        }
-
-        if (result.suggestions.length === 0) {
-           consecutiveNoSuggestions++;
-           // Chỉ stop khi FILLING kết thúc (no more unassigned) hoặc REPAIRING failed 3 times
-           if (mode === 'REPAIRING' && consecutiveNoSuggestions >= 3) {
-             fullLog = `⚠️ REPAIRING: Không tìm thấy đề xuất ${consecutiveNoSuggestions} vòng. Hoàn tất.\n` + fullLog;
-             setAiAnalysis(fullLog);
-             break;
-           }
-           fullLog = `⚠️ Không tìm thấy đề xuất ở vòng ${i}, thử lại...\n` + fullLog;
-           setAiAnalysis(fullLog);
-           await sleep(2000);
-           continue;
-        }
-
-        consecutiveNoSuggestions = 0; // Reset counter khi có suggestion
+      if (result.suggestions.length > 0) {
         const { updated, changeCount } = applySuggestions(result.suggestions);
         currentCourses = updated;
-        fullLog = `⚡ [${mode === 'FILLING' ? 'Lấp' : 'Sửa'} ${i}] ${result.report}\n` + fullLog;
+        fullLog = `⚡ [Scheduling] ${result.report}\n` + fullLog;
         setAiAnalysis(fullLog);
-        
-        await sleep(2000);
-        
-        if (changeCount === 0 && mode === 'REPAIRING') {
-          consecutiveNoSuggestions++;
-          if (consecutiveNoSuggestions >= 2) break;
-        }
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      } else {
+        fullLog = `⚠️ ${result.report}\n` + fullLog;
+        setAiAnalysis(fullLog);
       }
-    };
 
-    try {
-      await processPhase('FILLING', maxFillIters);
-      await processPhase('REPAIRING', maxRepairIters);
-      setAiAnalysis("✅ TIẾN TRÌNH HOÀN TẤT.\n" + fullLog);
+      setAiAnalysis("✅ HOÀN TẤT XẾP LỊCH.\n" + fullLog);
     } catch (error) {
       setAiAnalysis("❌ Lỗi hệ thống: " + (error as Error).message);
     } finally {
@@ -297,60 +185,17 @@ const App: React.FC = () => {
               <Zap className="w-6 h-6 fill-white" />
             </div>
             <div>
-              <h1 className="text-xl font-black tracking-tighter italic leading-none">UNITIME <span className="text-indigo-400">TURBO</span></h1>
-              <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest mt-1 opacity-70">Extreme Optimization Active</p>
+              <h1 className="text-xl font-black tracking-tighter italic leading-none">UNITIME <span className="text-indigo-400">SCHEDULER</span></h1>
+              <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest mt-1 opacity-70">Hardcoded Logic v1.0</p>
             </div>
           </div>
           
           <div className="flex items-center gap-4">
-            <button 
-              onClick={() => setIsApiKeyModalOpen(true)}
-              className={`flex items-center gap-2 px-4 py-2 rounded-2xl border transition-all ${hasApiKey ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400' : 'bg-red-500/10 border-red-500/30 text-red-400 animate-pulse'}`}
-            >
-              <Key className="w-4 h-4" />
-              <span className="text-[11px] font-black uppercase tracking-widest">
-                {hasApiKey ? 'API KEY: OK' : 'CẤU HÌNH API KEY'}
+            <div className={`flex items-center gap-3 px-4 py-2 rounded-2xl border backdrop-blur-md transition-all ${isAnalyzing ? 'bg-indigo-500/20 border-indigo-500/40 ring-4 ring-indigo-500/10' : 'bg-white/5 border-white/10'}`}>
+              {isAnalyzing ? <Loader2 className="w-4 h-4 text-indigo-400 animate-spin" /> : <Zap className="w-4 h-4 text-indigo-400" />}
+              <span className={`text-[11px] font-black uppercase tracking-widest ${isAnalyzing ? 'text-indigo-100' : 'text-indigo-100'}`}>
+                {isAnalyzing ? `XẾP LỊCH: ${iteration}` : 'SẴN SÀNG'}
               </span>
-            </button>
-
-            {isAnalyzing && (
-              <div className={`flex items-center gap-3 px-4 py-2 rounded-2xl border backdrop-blur-md transition-all ${quotaCountdown > 0 ? 'bg-red-500/20 border-red-500/40 ring-4 ring-red-500/10' : 'bg-white/5 border-white/10'}`}>
-                {quotaCountdown > 0 ? <Clock className="w-4 h-4 text-red-400 animate-pulse" /> : <Loader2 className="w-4 h-4 text-indigo-400 animate-spin" />}
-                <span className={`text-[11px] font-black uppercase tracking-widest ${quotaCountdown > 0 ? `text-red-200` : 'text-indigo-100'}`}>
-                  {quotaCountdown > 0 ? `Đang hồi Quota: ${quotaCountdown}s` : `${currentMode === 'FILLING' ? 'Lấp đầy' : 'Sửa lỗi'}: ${iteration}`}
-                </span>
-              </div>
-            )}
-            
-            <div className="flex items-center gap-4 bg-white/5 px-4 py-2 rounded-2xl border border-white/10">
-               <Settings2 className="w-4 h-4 text-slate-500" />
-               <div className="flex items-center gap-6">
-                  <div className="flex flex-col">
-                    <span className="text-[8px] font-black text-slate-500 uppercase tracking-widest text-center">Vòng lặp (F/R)</span>
-                    <div className="flex gap-1 mt-1">
-                       <select value={maxFillIters} onChange={e => setMaxFillIters(Number(e.target.value))} disabled={isAnalyzing} className="bg-slate-800 text-[10px] font-bold p-1 rounded outline-none border-none cursor-pointer">
-                         {[5,10,15,20,30].map(v => <option key={v} value={v}>{v}</option>)}
-                       </select>
-                       <select value={maxRepairIters} onChange={e => setMaxRepairIters(Number(e.target.value))} disabled={isAnalyzing} className="bg-slate-800 text-[10px] font-bold p-1 rounded outline-none border-none cursor-pointer">
-                         {[3,5,8,12,15].map(v => <option key={v} value={v}>{v}</option>)}
-                       </select>
-                    </div>
-                  </div>
-                  
-                  <div className="flex flex-col">
-                    <span className="text-[8px] font-black text-slate-500 uppercase tracking-widest text-center">Hồi Quota</span>
-                    <div className="flex mt-1">
-                       <select 
-                         value={quotaWaitTime} 
-                         onChange={e => setQuotaWaitTime(Number(e.target.value))} 
-                         disabled={isAnalyzing} 
-                         className="bg-slate-800 text-[10px] font-bold p-1 rounded outline-none border-none cursor-pointer"
-                       >
-                         {[0, 5, 10, 15, 20, 25, 30].map(v => <option key={v} value={v}>{v}s</option>)}
-                       </select>
-                    </div>
-                  </div>
-               </div>
             </div>
           </div>
         </div>
@@ -364,13 +209,14 @@ const App: React.FC = () => {
                    <FileSpreadsheet className="w-12 h-12 text-white" />
                 </div>
                 <h2 className="text-5xl font-black text-slate-800 mb-4 tracking-tighter">Hệ thống <span className="text-indigo-600">Lập lịch</span></h2>
-                <p className="text-slate-400 text-lg mb-8 font-medium italic">Vui lòng đảm bảo đã cấu hình API Key để tránh lỗi 429</p>
+                <p className="text-slate-400 text-lg mb-8 font-medium italic">Xếp lịch bằng logic cứng (deterministic) - Không dùng AI</p>
                 
                 <button 
-                  onClick={() => setIsApiKeyModalOpen(true)}
-                  className="mb-8 px-8 py-4 bg-red-600 hover:bg-red-700 text-white rounded-[24px] font-black text-sm uppercase tracking-widest shadow-xl shadow-red-200 transition-all flex items-center gap-3 mx-auto"
+                  onClick={runTurboProcess}
+                  disabled={!isDataReady || isAnalyzing}
+                  className="mb-8 px-8 py-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-[24px] font-black text-sm uppercase tracking-widest shadow-xl shadow-indigo-200 transition-all flex items-center gap-3 mx-auto disabled:opacity-50"
                 >
-                  <Key className="w-5 h-5" /> {hasApiKey ? 'Thay đổi API Key' : 'Thiết lập API Key ngay'}
+                  <Zap className="w-5 h-5" /> {isAnalyzing ? 'Đang xếp lịch...' : 'Xếp lịch ngay'}
                 </button>
 
                 <div className="grid md:grid-cols-2 gap-8">
@@ -386,14 +232,14 @@ const App: React.FC = () => {
                <StatCard icon={<HelpCircle className="text-amber-500" />} label="Chưa có phòng" value={unassignedCount} color="amber" />
                <StatCard icon={<IconShieldAlert className="text-red-500" />} label="Xung đột AI" value={errorCount} color="red" />
                <StatCard icon={<Home className="text-indigo-500" />} label="Phòng còn chỗ" value={roomsWithSpace} color="indigo" />
-               <button onClick={runTurboProcess} disabled={isAnalyzing} className={`group relative overflow-hidden p-6 rounded-[36px] shadow-2xl transition-all duration-300 flex items-center gap-5 text-left disabled:opacity-50 ${isAnalyzing ? (quotaCountdown > 0 ? 'bg-red-600' : 'bg-slate-800') : 'bg-indigo-600 hover:bg-indigo-700 hover:-translate-y-1 hover:shadow-indigo-300'}`}>
+               <button onClick={runTurboProcess} disabled={isAnalyzing} className={`group relative overflow-hidden p-6 rounded-[36px] shadow-2xl transition-all duration-300 flex items-center gap-5 text-left disabled:opacity-50 ${isAnalyzing ? 'bg-slate-800' : 'bg-indigo-600 hover:bg-indigo-700 hover:-translate-y-1 hover:shadow-indigo-300'}`}>
                   <div className="w-12 h-12 rounded-2xl bg-white/20 flex items-center justify-center z-10 shrink-0">
-                    {isAnalyzing ? (quotaCountdown > 0 ? <Clock className="w-6 h-6 text-white animate-pulse" /> : <Loader2 className="w-6 h-6 text-white animate-spin" />) : <Zap className="w-6 h-6 text-white" />}
+                    {isAnalyzing ? <Loader2 className="w-6 h-6 text-white animate-spin" /> : <Zap className="w-6 h-6 text-white" />}
                   </div>
                   <div className="z-10">
                      <p className="text-[10px] text-white/60 uppercase font-black tracking-widest leading-tight">Trạng thái</p>
                      <p className="text-lg font-black text-white leading-tight">
-                        {quotaCountdown > 0 ? `ĐỢI ${quotaCountdown}s` : (isAnalyzing ? 'ĐANG CHẠY' : 'CHẠY TURBO')}
+                        {isAnalyzing ? 'ĐANG CHẠY' : 'CHẠY LỊCH'}
                      </p>
                   </div>
                </button>
@@ -431,13 +277,13 @@ const App: React.FC = () => {
             {aiAnalysis && (
               <div className="bg-slate-900 border border-slate-800 rounded-[48px] shadow-2xl p-10 animate-in slide-in-from-top-6">
                 <div className="flex items-center gap-4 mb-6">
-                   <div className={`p-3 rounded-[20px] ring-1 transition-colors ${quotaCountdown > 0 ? 'bg-red-500/20 ring-red-500/30' : 'bg-indigo-500/20 ring-indigo-500/30'}`}>
-                      {quotaCountdown > 0 ? <AlertOctagon className="w-6 h-6 text-red-400" /> : <Code className="w-6 h-6 text-indigo-400" />}
+                   <div className="p-3 rounded-[20px] ring-1 transition-colors bg-indigo-500/20 ring-indigo-500/30">
+                      <Code className="w-6 h-6 text-indigo-400" />
                    </div>
                    <div>
                       <h3 className="text-lg font-black uppercase tracking-tighter text-white">DEBUG & ENGINE LOG</h3>
                       <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">
-                        {quotaCountdown > 0 ? "⚠️ HẠN MỨC API ĐÃ HẾT - TỰ ĐỘNG THỬ LẠI KHI CÓ QUOTA" : "Flash Engine: Tự động lặp cho đến khi tối ưu"}
+                        Hardcoded Logic: Xếp lịch theo luật cứng định sẵn
                       </p>
                    </div>
                    <div className="flex-1" />
@@ -451,12 +297,6 @@ const App: React.FC = () => {
           </div>
         )}
       </main>
-
-      <ApiKeyModal 
-        isOpen={isApiKeyModalOpen}
-        onClose={() => setIsApiKeyModalOpen(false)}
-        onSubmit={handleApiKeySubmit}
-      />
     </div>
   );
 };

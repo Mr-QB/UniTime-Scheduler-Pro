@@ -11,6 +11,7 @@ interface OccupancyMapProps {
 
 const OccupancyMap: React.FC<OccupancyMapProps> = ({ courses, rooms }) => {
   const [searchTerm, setSearchTerm] = useState('');
+  const [courseCodeFilter, setCourseCodeFilter] = useState('');
   
   const days = ["2", "3", "4", "5", "6", "7"];
   const periods = ["1", "4", "7", "10"]; // Chỉ dùng tiết bắt đầu làm key
@@ -21,6 +22,11 @@ const OccupancyMap: React.FC<OccupancyMapProps> = ({ courses, rooms }) => {
     const map = new Map<string, Map<string, CourseData[]>>();
     
     courses.forEach(c => {
+      // Filter by courseCode if specified
+      if (courseCodeFilter && !c.courseCode?.toLowerCase().includes(courseCodeFilter.toLowerCase())) {
+        return;
+      }
+      
       const rName = (c.suggestedRoom || c.room || "").trim().toLowerCase();
       if (!rName || rName === 'null' || rName === '') return;
       
@@ -35,7 +41,7 @@ const OccupancyMap: React.FC<OccupancyMapProps> = ({ courses, rooms }) => {
     });
     
     return map;
-  }, [courses]);
+  }, [courses, courseCodeFilter]);
 
   const filteredRooms = useMemo(() => 
     rooms.filter(r => r.roomName.toLowerCase().includes(searchTerm.toLowerCase())),
@@ -63,6 +69,17 @@ const OccupancyMap: React.FC<OccupancyMapProps> = ({ courses, rooms }) => {
             className="w-full pl-9 pr-4 py-2 bg-white border border-slate-200 rounded-xl text-[11px] font-medium focus:ring-2 focus:ring-indigo-500 outline-none transition-all shadow-sm"
             value={searchTerm}
             onChange={e => setSearchTerm(e.target.value)}
+          />
+        </div>
+
+        <div className="relative w-56">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
+          <input 
+            type="text" 
+            placeholder="Lọc theo Mã HP..." 
+            className="w-full pl-9 pr-4 py-2 bg-white border border-slate-200 rounded-xl text-[11px] font-medium focus:ring-2 focus:ring-indigo-500 outline-none transition-all shadow-sm"
+            value={courseCodeFilter}
+            onChange={e => setCourseCodeFilter(e.target.value)}
           />
         </div>
         

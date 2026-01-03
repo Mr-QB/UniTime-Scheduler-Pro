@@ -24,46 +24,67 @@ const FileUploader: React.FC<FileUploaderProps> = ({ onUpload, onRemove, type, l
       return;
     }
 
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      try {
-        const data = e.target?.result;
-        const workbook = XLSX.read(data, { type: 'binary' });
-        const sheetName = workbook.SheetNames[0];
-        const worksheet = workbook.Sheets[sheetName];
-        const json = XLSX.utils.sheet_to_json<any>(worksheet);
+    try {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        try {
+          const data = e.target?.result;
+          if (!data) {
+            setError("Không thể đọc dữ liệu file");
+            return;
+          }
+          
+          const workbook = XLSX.read(data, { type: 'binary' });
+          const sheetName = workbook.SheetNames[0];
+          if (!sheetName) {
+            setError("File Excel không có sheet nào");
+            return;
+          }
+          
+          const worksheet = workbook.Sheets[sheetName];
+          const json = XLSX.utils.sheet_to_json<any>(worksheet);
+          
+          if (!json || json.length === 0) {
+            setError("File Excel không có dữ liệu");
+            return;
+          }
 
-        if (type === 'course') {
-          const formattedData: CourseData[] = json.map((row: any) => ({
-            stt: row['STT'] || '',
-            courseCode: row['Mã học phần'] || row['Mã HP'] || '',
-            courseName: row['Tên học phần'] || row['Học phần'] || '',
-            credits: row['Số tín chỉ'] || row['Số TC'] || 0,
-            sectionCode: row['Mã lớp học phần'] || row['Mã LHP'] || '',
-            lecturer: row['Giảng viên'] || row['Giảng Viên'] || '',
-            studentCount: Number(row['Số sinh viên'] || row['Số SV'] || 0),
-            registeredCount: Number(row['Số đăng ký'] || row['Số ĐK'] || 0),
-            dayOfWeek: row['Thứ'] || '',
-            period: row['Tiết'] || '',
-            room: row['Giảng đường'] || '',
-            duration: row['Thời lượng'] || ''
-          }));
-          onUpload(formattedData, file.name, 'course');
-        } else {
-          const formattedData: RoomData[] = json.map((row: any) => ({
-            stt: row['STT'] || '',
-            roomName: row['Phòng'] || row['Tên phòng'] || '',
-            capacity: Number(row['SL'] || row['Số lượng'] || row['Sức chứa'] || 0),
-          }));
-          onUpload(formattedData, file.name, 'room');
+          if (type === 'course') {
+            const formattedData: CourseData[] = json.map((row: any) => ({
+              stt: row['STT'] || '',
+              courseCode: row['Mã học phần'] || row['Mã HP'] || '',
+              courseName: row['Tên học phần'] || row['Học phần'] || '',
+              credits: row['Số tín chỉ'] || row['Số TC'] || 0,
+              sectionCode: row['Mã lớp học phần'] || row['Mã LHP'] || '',
+              lecturer: row['Giảng viên'] || row['Giảng Viên'] || '',
+              studentCount: Number(row['Số sinh viên'] || row['Số SV'] || 0),
+              registeredCount: Number(row['Số đăng ký'] || row['Số ĐK'] || 0),
+              dayOfWeek: row['Thứ'] || '',
+              period: row['Tiết'] || '',
+              room: row['Giảng đường'] || '',
+              duration: row['Thời lượng'] || '',
+              validationStatus: 'unchecked' as const
+            }));
+            onUpload(formattedData, file.name, 'course');
+          } else {
+            const formattedData: RoomData[] = json.map((row: any) => ({
+              stt: row['STT'] || '',
+              roomName: row['Phòng'] || row['Tên phòng'] || '',
+              capacity: Number(row['SL'] || row['Số lượng'] || row['Sức chứa'] || 0),
+            }));
+            onUpload(formattedData, file.name, 'room');
+          }
+          setError(null);
+        } catch (err) {
+          setError("Có lỗi khi xử lý file Excel: " + (err instanceof Error ? err.message : String(err)));
+          console.error(err);
         }
-        setError(null);
-      } catch (err) {
-        setError("Có lỗi khi đọc file Excel. Vui lòng kiểm tra lại định dạng.");
-        console.error(err);
-      }
-    };
-    reader.readAsBinaryString(file);
+      };
+      reader.readAsBinaryString(file);
+    } catch (err) {
+      setError("Lỗi khi đọc file: " + (err instanceof Error ? err.message : String(err)));
+      console.error(err);
+    }
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
