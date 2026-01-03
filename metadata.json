@@ -1,0 +1,5 @@
+{
+  "name": "UniTime Scheduler Pro",
+  "description": "A professional university timetable management system that parses Excel data, identifies missing rooms, and provides AI-powered scheduling insights.",
+  "requestFramePermissions": []
+}
