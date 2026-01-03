@@ -1,5 +1,5 @@
 
-import React, { useState } from 'react';
+import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import { 
   LayoutDashboard as IconDashboard,
   ShieldCheck as IconShield,
@@ -7,20 +7,31 @@ import {
   Sparkles as IconSparkles,
   PieChart as IconAnalyze,
   HelpCircle,
-  AlertTriangle,
   FileSpreadsheet,
   Home,
   Settings2,
-  CheckCircle,
   Loader2,
-  RefreshCw
+  Zap,
+  Wrench,
+  Trash2,
+  AlertCircle,
+  Code,
+  Coffee,
+  Grid3X3,
+  BarChart3,
+  Clock,
+  AlertOctagon,
+  Key
 } from 'lucide-react';
 import { CourseData, RoomData } from './types';
 import TimetableGrid from './components/TimetableGrid';
 import RoomGrid from './components/RoomGrid';
+import OccupancyMap from './components/OccupancyMap';
 import FileUploader from './components/FileUploader';
-import { analyzeSchedule } from './services/geminiService';
-import { validateAISuggestions } from './utils/validator';
+import { analyzeSchedule, AISolveMode } from './services/geminiService';
+import { validateAISuggestions, normalizeDay, getStartPeriod } from './utils/validator';
+
+// Removed custom Window/aistudio declaration as AIStudio type is pre-defined in the environment.
 
 const App: React.FC = () => {
   const [courses, setCourses] = useState<CourseData[]>([]);
@@ -29,218 +40,320 @@ const App: React.FC = () => {
   const [roomFileName, setRoomFileName] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [aiAnalysis, setAiAnalysis] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'schedule' | 'rooms'>('schedule');
+  const [activeTab, setActiveTab] = useState<'schedule' | 'rooms' | 'occupancy'>('schedule');
+  const [currentMode, setCurrentMode] = useState<AISolveMode | 'IDLE'>('IDLE');
   
-  const [allowOverride, setAllowOverride] = useState(false);
+  const [maxFillIters, setMaxFillIters] = useState(15);
+  const [maxRepairIters, setMaxRepairIters] = useState(8);
   const [iteration, setIteration] = useState(0);
-  const maxAttempts = 10; // Tăng số vòng lặp nhưng mỗi vòng sẽ nhanh hơn
+  const [quotaCountdown, setQuotaCountdown] = useState(0);
+  const [hasApiKey, setHasApiKey] = useState<boolean>(false);
+
+  const isDataReady = courses.length > 0 && rooms.length > 0;
+  const TOTAL_SLOTS_PER_ROOM = 24;
+
+  // Kiểm tra API Key khi khởi chạy
+  useEffect(() => {
+    const checkKey = async () => {
+      // Using existing global aistudio definition
+      if (window.aistudio) {
+        const hasKey = await window.aistudio.hasSelectedApiKey();
+        setHasApiKey(hasKey);
+      }
+    };
+    checkKey();
+  }, []);
+
+  const handleOpenKeySelector = async () => {
+    // Using existing global aistudio definition
+    if (window.aistudio) {
+      await window.aistudio.openSelectKey();
+      setHasApiKey(true); // Giả định thành công sau khi mở dialog
+    }
+  };
+
+  // Countdown timer effect
+  useEffect(() => {
+    let timer: any;
+    if (quotaCountdown > 0) {
+      timer = setInterval(() => setQuotaCountdown(prev => prev - 1), 1000);
+    }
+    return () => clearInterval(timer);
+  }, [quotaCountdown]);
+
+  const validatedCourses = useMemo(() => {
+    if (!isDataReady) return courses;
+    return validateAISuggestions(courses, rooms);
+  }, [courses, rooms, isDataReady]);
+
+  const roomUsageMap = useMemo(() => {
+    const usage = new Map<string, Set<string>>();
+    validatedCourses.forEach(c => {
+      const r = (c.suggestedRoom || c.room || "").trim().toLowerCase();
+      if (r && r !== "null" && r !== "" && (c.validationStatus === 'verified' || !c.suggestedRoom)) {
+        if (!usage.has(r)) usage.set(r, new Set());
+        const day = normalizeDay(c.dayOfWeek);
+        const startP = getStartPeriod(c.period);
+        usage.get(r)!.add(`${day}-${startP}`);
+      }
+    });
+    return usage;
+  }, [validatedCourses]);
+
+  const roomsWithSpace = useMemo(() => {
+    if (!isDataReady) return 0;
+    return rooms.filter(r => {
+      const used = roomUsageMap.get(r.roomName.trim().toLowerCase())?.size || 0;
+      return used < TOTAL_SLOTS_PER_ROOM;
+    }).length;
+  }, [rooms, roomUsageMap, isDataReady]);
 
   const handleFileUpload = (data: any[], name: string, type: 'course' | 'room') => {
     if (type === 'course') {
-      setCourses(data.map(item => ({ ...item, isError: false, suggestedRoom: undefined, validationStatus: 'unchecked' })));
+      setCourses(data.map(item => ({ ...item, validationStatus: 'unchecked' })));
       setCourseFileName(name);
     } else {
       setRooms(data);
       setRoomFileName(name);
     }
-    setAiAnalysis(null);
-    setIteration(0);
   };
 
-  const removeFile = (type: 'course' | 'room') => {
-    if (type === 'course') { setCourses([]); setCourseFileName(null); }
-    else { setRooms([]); setRoomFileName(null); }
-    setAiAnalysis(null);
-    setIteration(0);
-  };
+  const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-  const runAiAnalysis = async () => {
-    if (courses.length === 0 || rooms.length === 0) return;
-    setIsAnalyzing(true);
+  const runTurboProcess = async () => {
+    if (!isDataReady) return;
     
+    // Yêu cầu cấu hình Key nếu chưa có
+    if (!hasApiKey) {
+      await handleOpenKeySelector();
+    }
+
+    setIsAnalyzing(true);
+    setQuotaCountdown(0);
     let currentCourses = [...courses];
-    let attempt = 0;
-    let fullLog = "";
+    let fullLog = `🚀 KHỞI ĐỘNG TURBO ENGINE...\n`;
+    setAiAnalysis(fullLog);
+
+    const applySuggestions = (suggestions: {stt: any, room: string}[]) => {
+      const sugMap = new Map(suggestions.map(s => [String(s.stt), s.room]));
+      let changeCount = 0;
+      const updated = currentCourses.map(c => {
+        const res = sugMap.get(String(c.stt));
+        if (res) {
+          if (c.suggestedRoom !== res) {
+            changeCount++;
+            return { ...c, suggestedRoom: res };
+          }
+        }
+        return c;
+      });
+      return { updated, changeCount };
+    };
+
+    const processPhase = async (mode: AISolveMode, maxIters: number) => {
+      setCurrentMode(mode);
+      for (let i = 1; i <= maxIters; i++) {
+        setIteration(i);
+        const validState = validateAISuggestions(currentCourses, rooms);
+        setCourses([...validState]);
+
+        let hasTargets = false;
+        if (mode === 'FILLING') {
+          hasTargets = validState.some(c => (!c.room || c.room.toLowerCase() === 'null' || c.room.trim() === '') && !c.suggestedRoom);
+        } else {
+          hasTargets = validState.some(c => c.suggestedRoom && c.validationStatus === 'violated');
+        }
+        
+        if (!hasTargets) break;
+
+        const result = await analyzeSchedule(validState, rooms, mode, i);
+        
+        if (result.errorType === 'QUOTA') {
+          const waitTime = 30; 
+          setQuotaCountdown(waitTime);
+          fullLog = `⏳ [QUOTA 429] Đang tạm nghỉ ${waitTime}s để hồi hạn mức API...\n` + fullLog;
+          setAiAnalysis(fullLog);
+          await sleep(waitTime * 1000);
+          setQuotaCountdown(0);
+          i--; 
+          continue;
+        }
+
+        // Xử lý lỗi Requested entity was not found
+        if (result.report.includes("not found")) {
+          fullLog = `⚠️ Lỗi xác thực Key. Vui lòng chọn lại Key...\n` + fullLog;
+          setAiAnalysis(fullLog);
+          setHasApiKey(false);
+          await handleOpenKeySelector();
+          i--;
+          continue;
+        }
+
+        if (result.suggestions.length === 0) {
+           fullLog = `⚠️ Không tìm thấy đề xuất mới ở vòng ${i}.\n` + fullLog;
+           setAiAnalysis(fullLog);
+           break;
+        }
+
+        const { updated, changeCount } = applySuggestions(result.suggestions);
+        currentCourses = updated;
+        fullLog = `⚡ [${mode === 'FILLING' ? 'Lấp' : 'Sửa'} ${i}] ${result.report}\n` + fullLog;
+        setAiAnalysis(fullLog);
+        
+        await sleep(2000);
+        
+        if (changeCount === 0 && mode === 'REPAIRING') break;
+      }
+    };
 
     try {
-      while (attempt < maxAttempts) {
-        attempt++;
-        setIteration(attempt);
-        
-        // 1. Kiểm định trạng thái hiện tại
-        currentCourses = validateAISuggestions(currentCourses, rooms);
-        
-        const needsWork = currentCourses.filter(c => 
-          c.validationStatus === 'violated' || 
-          c.validationStatus === 'original_violated' || 
-          (!c.room || c.room.toLowerCase() === 'null' || c.room.trim() === '')
-        );
-
-        if (needsWork.length === 0 && attempt > 1) {
-          fullLog = `[HOÀN TẤT] Hệ thống đã hội tụ thành công.\n` + fullLog;
-          setAiAnalysis(fullLog);
-          break;
-        }
-
-        setAiAnalysis(`[Vòng ${attempt}] Đang xử lý ${needsWork.length} lớp còn lại...`);
-
-        const { report, suggestions } = await analyzeSchedule(currentCourses, rooms, allowOverride, attempt);
-        
-        if (suggestions.length === 0) {
-          fullLog = `[Vòng ${attempt}] AI không tìm thấy thêm phương án. Dừng tại đây.\n` + fullLog;
-          setAiAnalysis(fullLog);
-          break;
-        }
-
-        // 2. Cập nhật gợi ý hàng loạt
-        const suggestionMap = new Map(suggestions.map(s => [String(s.stt), s.room]));
-        
-        currentCourses = currentCourses.map(course => {
-          const sugRoom = suggestionMap.get(String(course.stt));
-          if (sugRoom) {
-            const isOriginalEmpty = !course.room || course.room.toLowerCase() === 'null' || course.room.trim() === '';
-            if (allowOverride || isOriginalEmpty) {
-              return { ...course, suggestedRoom: sugRoom };
-            }
-          }
-          return course;
-        });
-
-        // 3. Re-validate
-        currentCourses = validateAISuggestions(currentCourses, rooms);
-        setCourses([...currentCourses]);
-        
-        fullLog = `[Vòng ${attempt}] Xếp được ${suggestions.length} lớp. ${report}\n` + fullLog;
-        setAiAnalysis(fullLog);
-      }
+      await processPhase('FILLING', maxFillIters);
+      await processPhase('REPAIRING', maxRepairIters);
+      setAiAnalysis("✅ TIẾN TRÌNH HOÀN TẤT.\n" + fullLog);
     } catch (error) {
-      setAiAnalysis("Lỗi trong chu trình hội tụ turbo.");
+      setAiAnalysis("❌ Lỗi hệ thống: " + (error as Error).message);
     } finally {
       setIsAnalyzing(false);
+      setCurrentMode('IDLE');
+      setCourses(validateAISuggestions(currentCourses, rooms));
     }
   };
 
-  const originalErrorCount = courses.filter(c => c.validationStatus === 'original_violated').length;
-  const verifiedCount = courses.filter(c => c.validationStatus === 'verified').length;
-  const aiViolationCount = courses.filter(c => c.validationStatus === 'violated').length;
-  const unassignedCount = courses.filter(c => (!c.room || c.room.toLowerCase() === 'null' || c.room.trim() === '') && !c.suggestedRoom).length;
-  
-  const isDataReady = courses.length > 0 && rooms.length > 0;
+  const verifiedCount = validatedCourses.filter(c => c.validationStatus === 'verified').length;
+  const errorCount = validatedCourses.filter(c => c.suggestedRoom && c.validationStatus === 'violated').length;
+  const unassignedCount = validatedCourses.filter(c => (!c.room || c.room.toLowerCase() === 'null' || c.room.trim() === '') && !c.suggestedRoom).length;
 
   return (
-    <div className="min-h-screen flex flex-col bg-slate-50">
-      <header className="bg-slate-900 text-white shadow-md sticky top-0 z-50">
-        <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="bg-indigo-600 p-2 rounded-lg">
-              <IconDashboard className="w-5 h-5" />
+    <div className="min-h-screen flex flex-col bg-[#F8FAFC]">
+      <header className="bg-slate-900 text-white shadow-2xl sticky top-0 z-50 px-6 py-4">
+        <div className="max-w-7xl mx-auto flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <div className="bg-indigo-500 p-2.5 rounded-2xl shadow-lg shadow-indigo-500/20 rotate-3">
+              <Zap className="w-6 h-6 fill-white" />
             </div>
             <div>
-              <h1 className="text-md font-black leading-none uppercase tracking-tighter">UniTime <span className="text-indigo-400">Turbo</span></h1>
-              <p className="text-[9px] text-slate-400 mt-1 uppercase font-bold tracking-widest italic">High-Density Batch Processing</p>
+              <h1 className="text-xl font-black tracking-tighter italic leading-none">UNITIME <span className="text-indigo-400">TURBO</span></h1>
+              <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest mt-1 opacity-70">Extreme Optimization Active</p>
             </div>
           </div>
           
-          <div className="flex items-center gap-6">
-            <div className="flex items-center gap-3 bg-white/5 px-4 py-2 rounded-2xl border border-white/10">
-              <Settings2 className="w-4 h-4 text-indigo-400" />
-              <label className="flex items-center gap-2 cursor-pointer select-none">
-                <div className="relative inline-flex items-center">
-                  <input 
-                    type="checkbox" 
-                    checked={allowOverride} 
-                    onChange={(e) => setAllowOverride(e.target.checked)}
-                    className="sr-only peer"
-                  />
-                  <div className="w-9 h-5 bg-slate-700 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-500"></div>
-                </div>
-                <span className="text-[10px] font-black uppercase tracking-widest text-slate-300">Ghi đè lịch cũ</span>
-              </label>
+          <div className="flex items-center gap-4">
+            {/* Nút API KEY */}
+            <button 
+              onClick={handleOpenKeySelector}
+              className={`flex items-center gap-2 px-4 py-2 rounded-2xl border transition-all ${hasApiKey ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400' : 'bg-red-500/10 border-red-500/30 text-red-400 animate-pulse'}`}
+            >
+              <Key className="w-4 h-4" />
+              <span className="text-[11px] font-black uppercase tracking-widest">
+                {hasApiKey ? 'API KEY: OK' : 'CẤU HÌNH API KEY'}
+              </span>
+            </button>
+
+            {isAnalyzing && (
+              <div className={`flex items-center gap-3 px-4 py-2 rounded-2xl border backdrop-blur-md transition-all ${quotaCountdown > 0 ? 'bg-red-500/20 border-red-500/40 ring-4 ring-red-500/10' : 'bg-white/5 border-white/10'}`}>
+                {quotaCountdown > 0 ? <Clock className="w-4 h-4 text-red-400 animate-pulse" /> : <Loader2 className="w-4 h-4 text-indigo-400 animate-spin" />}
+                <span className={`text-[11px] font-black uppercase tracking-widest ${quotaCountdown > 0 ? `text-red-200` : 'text-indigo-100'}`}>
+                  {quotaCountdown > 0 ? `Đang hồi Quota: ${quotaCountdown}s` : `${currentMode === 'FILLING' ? 'Lấp đầy' : 'Sửa lỗi'}: ${iteration}`}
+                </span>
+              </div>
+            )}
+            
+            <div className="flex items-center gap-4 bg-white/5 px-4 py-2 rounded-2xl border border-white/10">
+               <Settings2 className="w-4 h-4 text-slate-500" />
+               <div className="flex items-center gap-4">
+                  <div className="flex flex-col">
+                    <span className="text-[8px] font-black text-slate-500 uppercase tracking-widest text-center">Vòng lặp</span>
+                    <div className="flex gap-1 mt-1">
+                       <select value={maxFillIters} onChange={e => setMaxFillIters(Number(e.target.value))} disabled={isAnalyzing} className="bg-slate-800 text-[10px] font-bold p-1 rounded outline-none border-none">
+                         {[5,10,15,20,30].map(v => <option key={v} value={v}>{v}F</option>)}
+                       </select>
+                       <select value={maxRepairIters} onChange={e => setMaxRepairIters(Number(e.target.value))} disabled={isAnalyzing} className="bg-slate-800 text-[10px] font-bold p-1 rounded outline-none border-none">
+                         {[3,5,8,12,15].map(v => <option key={v} value={v}>{v}R</option>)}
+                       </select>
+                    </div>
+                  </div>
+               </div>
             </div>
           </div>
         </div>
       </header>
 
-      <main className="flex-1 max-w-7xl mx-auto w-full p-4 md:p-6 space-y-8">
-        {!isDataReady && (
-          <div className="py-12 flex flex-col items-center text-center space-y-8">
-            <div className="inline-flex items-center gap-2 bg-indigo-50 text-indigo-600 px-4 py-1.5 rounded-full text-[11px] font-black uppercase tracking-widest border border-indigo-100 mb-2 animate-bounce">
-              <RefreshCw className="w-3 h-3" />
-              Batch processing: 200+ classes / round
-            </div>
-            <div className="bg-white p-10 rounded-[48px] shadow-2xl shadow-indigo-100 border border-slate-100 max-w-3xl w-full">
-              <h2 className="text-4xl font-black text-slate-800 mb-4 tracking-tighter italic">Quản lý Giảng đường Thông minh</h2>
-              <div className="grid md:grid-cols-2 gap-6 mt-8">
-                <FileUploader type="course" label="Lịch giảng dạy (.xlsx)" fileName={courseFileName} count={courses.length} onUpload={handleFileUpload} onRemove={() => removeFile('course')} />
-                <FileUploader type="room" label="Danh sách phòng (.xlsx)" fileName={roomFileName} count={rooms.length} onUpload={handleFileUpload} onRemove={() => removeFile('room')} />
-              </div>
-            </div>
+      <main className="flex-1 max-w-7xl mx-auto w-full p-6 space-y-6">
+        {!isDataReady ? (
+          <div className="py-20 flex flex-col items-center">
+             <div className="bg-white p-12 rounded-[64px] shadow-2xl shadow-indigo-100 border border-slate-100 max-w-2xl w-full text-center group">
+                <div className="w-24 h-24 bg-gradient-to-br from-indigo-600 to-blue-500 rounded-[32px] mx-auto flex items-center justify-center mb-10 shadow-2xl shadow-indigo-200">
+                   <FileSpreadsheet className="w-12 h-12 text-white" />
+                </div>
+                <h2 className="text-5xl font-black text-slate-800 mb-4 tracking-tighter">Hệ thống <span className="text-indigo-600">Lập lịch</span></h2>
+                <p className="text-slate-400 text-lg mb-8 font-medium italic">Vui lòng đảm bảo đã cấu hình API Key để tránh lỗi 429</p>
+                
+                {!hasApiKey && (
+                  <button 
+                    onClick={handleOpenKeySelector}
+                    className="mb-8 px-8 py-4 bg-red-600 hover:bg-red-700 text-white rounded-[24px] font-black text-sm uppercase tracking-widest shadow-xl shadow-red-200 transition-all flex items-center gap-3 mx-auto"
+                  >
+                    <Key className="w-5 h-5" /> Thiết lập API Key ngay
+                  </button>
+                )}
+
+                <div className="grid md:grid-cols-2 gap-8">
+                   <FileUploader type="course" label="Lịch giảng dạy" fileName={courseFileName} count={courses.length} onUpload={handleFileUpload} onRemove={() => {setCourses([]); setCourseFileName(null);}} />
+                   <FileUploader type="room" label="Danh sách phòng" fileName={roomFileName} count={rooms.length} onUpload={handleFileUpload} onRemove={() => {setRooms([]); setRoomFileName(null);}} />
+                </div>
+             </div>
           </div>
-        )}
-
-        {isDataReady && (
-          <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+        ) : (
+          <div className="space-y-6 animate-in fade-in slide-in-from-bottom-8 duration-700">
             <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
-              <div className="bg-white p-5 rounded-3xl shadow-sm border border-slate-200">
-                <p className="text-[10px] text-slate-400 uppercase font-black tracking-widest">Hợp lệ (Verified)</p>
-                <div className="flex items-baseline gap-2 mt-1">
-                  <p className="text-3xl font-black text-emerald-600">{verifiedCount}</p>
-                  <IconShield className="w-4 h-4 text-emerald-500" />
-                </div>
-              </div>
-              <div className="bg-white p-5 rounded-3xl shadow-sm border border-slate-200">
-                <p className="text-[10px] text-slate-400 uppercase font-black tracking-widest">Đang trống</p>
-                <div className="flex items-baseline gap-2 mt-1">
-                  <p className={`text-3xl font-black ${unassignedCount > 0 ? 'text-amber-500' : 'text-slate-200'}`}>{unassignedCount}</p>
-                  <HelpCircle className="w-4 h-4 text-amber-400" />
-                </div>
-              </div>
-              <div className="bg-white p-5 rounded-3xl shadow-sm border border-slate-200">
-                <p className="text-[10px] text-slate-400 uppercase font-black tracking-widest">Lỗi Gốc</p>
-                <p className={`text-3xl font-black mt-1 ${originalErrorCount > 0 ? 'text-amber-600' : 'text-slate-200'}`}>{originalErrorCount}</p>
-              </div>
-              <div className="bg-white p-5 rounded-3xl shadow-sm border border-slate-200">
-                <p className="text-[10px] text-slate-400 uppercase font-black tracking-widest text-red-400">AI Vi phạm</p>
-                <p className={`text-3xl font-black mt-1 ${aiViolationCount > 0 ? 'text-red-600' : 'text-slate-200'}`}>{aiViolationCount}</p>
-              </div>
-              <button 
-                onClick={runAiAnalysis}
-                disabled={isAnalyzing}
-                className={`text-white font-black rounded-3xl shadow-xl transition-all flex flex-col items-center justify-center gap-1 disabled:opacity-50 active:scale-95
-                  ${isAnalyzing ? 'bg-amber-500 shadow-amber-200' : 'bg-indigo-600 shadow-indigo-200 hover:bg-indigo-700'}
-                `}
-              >
-                <div className="flex items-center gap-2">
-                  {isAnalyzing ? <Loader2 className="w-4 h-4 animate-spin" /> : <IconAnalyze className="w-4 h-4" />}
-                  <span className="text-xs">{isAnalyzing ? `BATCH ${iteration}/${maxAttempts}...` : 'BẮT ĐẦU HỘI TỤ'}</span>
-                </div>
-                <span className="text-[9px] opacity-70 uppercase tracking-tighter">
-                  Greedy Filling Mode
-                </span>
-              </button>
+               <StatCard icon={<IconShield className="text-emerald-500" />} label="Xác minh" value={verifiedCount} color="emerald" />
+               <StatCard icon={<HelpCircle className="text-amber-500" />} label="Chưa có phòng" value={unassignedCount} color="amber" />
+               <StatCard icon={<IconShieldAlert className="text-red-500" />} label="Xung đột AI" value={errorCount} color="red" />
+               <StatCard icon={<Home className="text-indigo-500" />} label="Phòng còn chỗ" value={roomsWithSpace} color="indigo" />
+               <button onClick={runTurboProcess} disabled={isAnalyzing} className={`group relative overflow-hidden p-6 rounded-[36px] shadow-2xl transition-all duration-300 flex items-center gap-5 text-left disabled:opacity-50 ${isAnalyzing ? (quotaCountdown > 0 ? 'bg-red-600' : 'bg-slate-800') : 'bg-indigo-600 hover:bg-indigo-700 hover:-translate-y-1 hover:shadow-indigo-300'}`}>
+                  <div className="w-12 h-12 rounded-2xl bg-white/20 flex items-center justify-center z-10 shrink-0">
+                    {isAnalyzing ? (quotaCountdown > 0 ? <Clock className="w-6 h-6 text-white animate-pulse" /> : <Loader2 className="w-6 h-6 text-white animate-spin" />) : <Zap className="w-6 h-6 text-white" />}
+                  </div>
+                  <div className="z-10">
+                     <p className="text-[10px] text-white/60 uppercase font-black tracking-widest leading-tight">Trạng thái</p>
+                     <p className="text-lg font-black text-white leading-tight">
+                        {quotaCountdown > 0 ? `ĐỢI ${quotaCountdown}s` : (isAnalyzing ? 'ĐANG CHẠY' : 'CHẠY TURBO')}
+                     </p>
+                  </div>
+               </button>
             </div>
 
-            <div className="bg-white rounded-[32px] shadow-xl border border-slate-200 overflow-hidden">
-              <div className="flex border-b border-slate-100 bg-slate-50/50 p-2">
-                <button onClick={() => setActiveTab('schedule')} className={`px-8 py-3 text-[11px] font-black rounded-2xl transition-all ${activeTab === 'schedule' ? 'bg-indigo-600 text-white shadow-lg' : 'text-slate-400 hover:text-indigo-600'}`}>LỊCH TRÌNH & KIỂM ĐỊNH</button>
-                <button onClick={() => setActiveTab('rooms')} className={`px-8 py-3 text-[11px] font-black rounded-2xl ml-2 transition-all ${activeTab === 'rooms' ? 'bg-indigo-600 text-white shadow-lg' : 'text-slate-400 hover:text-indigo-600'}`}>DANH SÁCH PHÒNG</button>
-                <div className="flex-1" />
-                <button onClick={() => { setCourses([]); setRooms([]); setAiAnalysis(null); setCourseFileName(null); setRoomFileName(null); setIteration(0); }} className="text-[10px] font-bold text-slate-400 px-6 hover:text-red-500 transition-colors uppercase tracking-widest">Làm mới</button>
-              </div>
-              <div className="p-0 overflow-hidden">
-                {activeTab === 'schedule' ? <TimetableGrid data={courses} /> : <RoomGrid data={rooms} />}
-              </div>
+            <div className="bg-white rounded-[48px] shadow-xl border border-slate-100 overflow-hidden min-h-[600px] flex flex-col">
+               <div className="flex border-b border-slate-50 bg-slate-50/30 p-3 overflow-x-auto no-scrollbar">
+                  <TabButton active={activeTab === 'schedule'} onClick={() => setActiveTab('schedule')} icon={<FileSpreadsheet className="w-4 h-4" />} label="BẢNG LỊCH TRÌNH" />
+                  <TabButton active={activeTab === 'rooms'} onClick={() => setActiveTab('rooms')} icon={<Home className="w-4 h-4" />} label={`DS PHÒNG (${roomsWithSpace} PHÒNG CÒN CHỖ)`} />
+                  <TabButton active={activeTab === 'occupancy'} onClick={() => setActiveTab('occupancy')} icon={<Grid3X3 className="w-4 h-4" />} label="BẢN ĐỒ CHIẾM DỤNG" />
+                  <div className="flex-1" />
+                  <button onClick={() => {setCourses([]); setRooms([]); setAiAnalysis(null); setCourseFileName(null); setRoomFileName(null);}} className="px-6 flex items-center gap-2 text-[11px] font-black text-slate-400 hover:text-red-500 transition-colors uppercase tracking-widest"><Trash2 className="w-4 h-4"/> Xóa hết</button>
+               </div>
+               <div className="flex-1 overflow-hidden">
+                  {activeTab === 'schedule' && <TimetableGrid data={validatedCourses} />}
+                  {activeTab === 'rooms' && <RoomGrid data={rooms} roomUsageMap={roomUsageMap} />}
+                  {activeTab === 'occupancy' && <OccupancyMap courses={validatedCourses} rooms={rooms} />}
+               </div>
             </div>
 
             {aiAnalysis && (
-              <div className="bg-slate-900 border border-slate-800 rounded-[32px] shadow-2xl overflow-hidden p-8">
-                <div className="flex items-center gap-3 mb-6">
-                  <div className="p-2 bg-indigo-500/20 rounded-xl">
-                    <IconSparkles className="w-5 h-5 text-indigo-400" />
-                  </div>
-                  <h3 className="text-sm font-black uppercase tracking-widest text-white">Log Hội tụ Trí tuệ Nhân tạo</h3>
+              <div className="bg-slate-900 border border-slate-800 rounded-[48px] shadow-2xl p-10 animate-in slide-in-from-top-6">
+                <div className="flex items-center gap-4 mb-6">
+                   <div className={`p-3 rounded-[20px] ring-1 transition-colors ${quotaCountdown > 0 ? 'bg-red-500/20 ring-red-500/30' : 'bg-indigo-500/20 ring-indigo-500/30'}`}>
+                      {quotaCountdown > 0 ? <AlertOctagon className="w-6 h-6 text-red-400" /> : <Code className="w-6 h-6 text-indigo-400" />}
+                   </div>
+                   <div>
+                      <h3 className="text-lg font-black uppercase tracking-tighter text-white">DEBUG & ENGINE LOG</h3>
+                      <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">
+                        {quotaCountdown > 0 ? "⚠️ HẠN MỨC API ĐÃ HẾT - TỰ ĐỘNG THỬ LẠI KHI CÓ QUOTA" : "Flash Engine: Tự động lặp cho đến khi tối ưu"}
+                      </p>
+                   </div>
+                   <div className="flex-1" />
+                   <a href="https://ai.google.dev/gemini-api/docs/billing" target="_blank" className="text-[9px] text-slate-500 hover:text-indigo-400 transition-colors font-bold uppercase tracking-widest border border-slate-800 px-3 py-1 rounded-full">Tài liệu Billing</a>
                 </div>
-                <div className="text-[11px] text-slate-400 font-mono whitespace-pre-wrap max-h-60 overflow-y-auto custom-scrollbar leading-relaxed">
+                <div className="text-[12px] text-slate-300 font-mono whitespace-pre-wrap max-h-56 overflow-y-auto custom-scrollbar leading-relaxed bg-black/40 p-6 rounded-[32px] border border-white/5">
                   {aiAnalysis}
                 </div>
               </div>
@@ -251,5 +364,23 @@ const App: React.FC = () => {
     </div>
   );
 };
+
+const StatCard = ({ icon, label, value, color }: { icon: any, label: string, value: number, color: string }) => (
+  <div className="bg-white p-6 rounded-[40px] shadow-sm border border-slate-100 flex items-center gap-5 group hover:shadow-lg transition-all duration-300">
+    <div className={`w-12 h-12 rounded-2xl bg-${color}-50 flex items-center justify-center group-hover:scale-110 transition-transform shrink-0`}>
+      {React.cloneElement(icon as React.ReactElement<any>, { className: `w-6 h-6 text-${color}-500` })}
+    </div>
+    <div className="min-w-0">
+      <p className="text-[10px] text-slate-400 uppercase font-black tracking-widest truncate">{label}</p>
+      <p className="text-2xl font-black text-slate-800 tracking-tighter truncate">{value}</p>
+    </div>
+  </div>
+);
+
+const TabButton = ({ active, onClick, icon, label }: { active: boolean, onClick: () => void, icon: any, label: string }) => (
+  <button onClick={onClick} className={`px-8 py-4 text-[11px] font-black rounded-[28px] transition-all flex items-center gap-3 whitespace-nowrap ${active ? 'bg-white text-indigo-600 shadow-xl shadow-indigo-100/50 border border-slate-100 scale-105' : 'text-slate-400 hover:text-indigo-600'}`}>
+    {icon} {label}
+  </button>
+);
 
 export default App;

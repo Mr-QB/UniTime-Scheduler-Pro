@@ -4,99 +4,106 @@ import { CourseData, RoomData } from "../types";
 
 export interface AIAnalysisResult {
   report: string;
+  debugPrompt?: string;
   suggestions: { stt: string | number, room: string }[];
+  errorType?: 'QUOTA' | 'OTHER';
 }
+
+export type AISolveMode = 'FILLING' | 'REPAIRING';
 
 export const analyzeSchedule = async (
   courses: CourseData[], 
   rooms: RoomData[],
-  allowOverride: boolean,
+  mode: AISolveMode,
   iteration: number
 ): Promise<AIAnalysisResult> => {
+  // QUAN TRỌNG: Tạo instance mới tại đây để lấy API_KEY mới nhất từ process.env
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-  
-  // 1. Lấy danh sách TARGET (Ưu tiên những lớp có ĐK cao nhất)
-  const targetCourses = courses.filter(c => 
-    c.validationStatus === 'violated' || 
-    c.validationStatus === 'original_violated' || 
-    (!c.room || c.room.toLowerCase() === 'null' || c.room.trim() === '')
-  ).sort((a, b) => (Number(b.registeredCount) || 0) - (Number(a.registeredCount) || 0));
+  const modelName = 'gemini-3-flash-preview';
 
-  if (targetCourses.length === 0) {
-    return { report: "Hoàn tất: Không còn lớp nào cần xếp.", suggestions: [] };
+  const BATCH_SIZE = 80; 
+  let targetCourses = [];
+  
+  if (mode === 'FILLING') {
+    targetCourses = courses.filter(c => 
+      (!c.room || c.room.toLowerCase() === 'null' || c.room.trim() === '') && 
+      !c.suggestedRoom
+    );
+  } else {
+    targetCourses = courses.filter(c => 
+      c.suggestedRoom && c.validationStatus === 'violated'
+    );
   }
 
-  // Lấy tối đa 300 lớp mỗi lượt để đảm bảo AI xử lý được trong 1 lần suy luận
-  const batch = targetCourses.slice(0, 300);
+  if (targetCourses.length === 0) return { report: "Hoàn tất", suggestions: [] };
 
-  // 2. Tạo bản đồ "Slot trống" cho từng phòng
-  const roomOccupancy: Record<string, Set<string>> = {};
+  targetCourses.sort((a, b) => (Number(b.registeredCount) || 0) - (Number(a.registeredCount) || 0));
+  const batch = targetCourses.slice(0, BATCH_SIZE);
+
+  const occupancyMap = new Map<string, Set<string>>();
   courses.forEach(c => {
-    const rName = c.suggestedRoom || c.room;
-    if (rName && rName.toLowerCase() !== 'null' && c.validationStatus === 'verified') {
-      if (!roomOccupancy[rName]) roomOccupancy[rName] = new Set();
-      roomOccupancy[rName].add(`${c.dayOfWeek}_${c.period}`);
+    const r = (c.suggestedRoom || c.room || "").trim().toLowerCase();
+    if (r && r !== 'null' && (c.validationStatus === 'verified' || (!c.suggestedRoom && c.room))) {
+      if (!occupancyMap.has(r)) occupancyMap.set(r, new Set());
+      const slotCode = `${c.dayOfWeek}${String(c.period).split('-')[0]}`;
+      occupancyMap.get(r)!.add(slotCode);
     }
   });
 
-  // Tóm tắt các phòng bận (đã được nén)
-  const roomsSummary = rooms.map(r => {
-    const occupied = Array.from(roomOccupancy[r.roomName] || []);
-    return `${r.roomName}(Cap:${r.capacity})[Bận:${occupied.join(',')}]`;
-  }).join('|');
+  const getSlotCode = (day: any, period: string) => `${day}${String(period).split('-')[0]}`;
+  const days = ["2", "3", "4", "5", "6", "7"];
+  const periods = ["1-3", "4-6", "7-9", "10-12"];
 
-  // 3. Nén danh sách TARGET cực độ
-  const targetText = batch.map(c => `${c.stt}:${c.registeredCount}@T${c.dayOfWeek}:${c.period}`).join(' ');
-
-  const prompt = `
-    TASK: UNIVERSITY TIMETABLE TURBO FILLER (ITERATION ${iteration}).
-    GOAL: Fill as many TARGETS as possible. Aim for 200+ assignments.
-
-    --- ROOMS DATA (NAME(CAP)[BUSY_SLOTS]) ---
-    ${roomsSummary}
-
-    --- TARGET CLASSES (STT:REG_COUNT@DAY:PERIOD) ---
-    ${targetText}
-
-    STRICT RULES:
-    1. A class at T2:1-3 can ONLY be put in a room NOT busy at '2_1-3'.
-    2. Room Capacity >= Reg_Count.
-    3. BE AGGRESSIVE: If a room is free at that time, ASSIGN IT. 
-    4. RETURN AS MANY AS YOU CAN. If you skip a class, explain why in report.
-
-    RESPONSE FORMAT (JSON):
-    {
-      "report": "Short summary",
-      "results": { "STT": "ROOM_NAME", "STT": "ROOM_NAME", ... }
+  const compressedRooms = rooms.map(r => {
+    const rKey = r.roomName.toLowerCase();
+    const freeSlots = [];
+    for (const d of days) {
+      for (const p of periods) {
+        if (!occupancyMap.get(rKey)?.has(getSlotCode(d, p))) {
+          freeSlots.push(getSlotCode(d, p));
+        }
+      }
     }
-    (Use 'results' as a simple Key-Value map for maximum token efficiency).
-  `;
+    return freeSlots.length ? `${r.roomName}(${r.capacity})[${freeSlots.join('')}]` : null;
+  }).filter(Boolean).join('|');
+
+  const compressedTargets = batch.map(c => 
+    `${c.stt}:${c.registeredCount}@${getSlotCode(c.dayOfWeek, c.period)}`
+  ).join(' ');
+
+  const prompt = `ACT AS: SCHEDULER. MODE: ${mode}. ROOMS: ${compressedRooms}. TARGETS: ${compressedTargets}. GOAL: Greedy. RES JSON: {"res":{"STT":"ROOM"}}`;
 
   try {
     const response = await ai.models.generateContent({
-      model: 'gemini-3-pro-preview',
+      model: modelName,
       contents: prompt,
       config: { 
         responseMimeType: "application/json",
-        thinkingConfig: { thinkingBudget: 32768 }
+        thinkingConfig: { thinkingBudget: 1024 }
       }
     });
     
-    const rawResult = JSON.parse(response.text || '{}');
-    const suggestions: { stt: string | number, room: string }[] = [];
-    
-    if (rawResult.results) {
-      Object.entries(rawResult.results).forEach(([stt, room]) => {
-        suggestions.push({ stt, room: String(room) });
-      });
-    }
+    const text = response.text || '{}';
+    const data = JSON.parse(text);
+    const suggestions = Object.entries(data.res || {}).map(([stt, room]) => ({ 
+      stt: stt.replace(/[!?]/g, ''), 
+      room: String(room) 
+    }));
 
     return {
-      report: rawResult.report || `Đã xử lý batch ${batch.length} lớp.`,
+      report: `Xếp được: ${suggestions.length}/${batch.length} lớp.`,
+      debugPrompt: `Batch: ${batch.length}`,
       suggestions
     };
-  } catch (error) {
-    console.error("Gemini Turbo Error:", error);
-    return { report: "Lỗi xử lý hàng loạt.", suggestions: [] };
+  } catch (e: any) {
+    const errorStr = JSON.stringify(e);
+    if (errorStr.includes("429") || errorStr.includes("RESOURCE_EXHAUSTED") || errorStr.includes("quota")) {
+      return { 
+        report: "⚠️ Hết hạn mức API (429). Đang tạm dừng...", 
+        suggestions: [],
+        errorType: 'QUOTA'
+      };
+    }
+    return { report: `Lỗi AI: ${e.message || "Không xác định"}`, suggestions: [] };
   }
 };
