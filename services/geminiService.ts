@@ -11,61 +11,92 @@ export const analyzeSchedule = async (
   courses: CourseData[], 
   rooms: RoomData[],
   allowOverride: boolean,
-  previousErrors: string[]
+  iteration: number
 ): Promise<AIAnalysisResult> => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   
-  const coursesSummary = courses.map(c => 
-    `STT:${c.stt}|LHP:${c.sectionCode}|ĐK:${c.registeredCount}|Thứ:${c.dayOfWeek}|Tiết:${c.period}|Phòng:${c.room || 'NULL'}|AI_Suggest:${c.suggestedRoom || 'None'}|Status:${c.validationStatus}`
-  ).join('\n');
+  // 1. Lấy danh sách TARGET (Ưu tiên những lớp có ĐK cao nhất)
+  const targetCourses = courses.filter(c => 
+    c.validationStatus === 'violated' || 
+    c.validationStatus === 'original_violated' || 
+    (!c.room || c.room.toLowerCase() === 'null' || c.room.trim() === '')
+  ).sort((a, b) => (Number(b.registeredCount) || 0) - (Number(a.registeredCount) || 0));
 
-  const roomsSummary = rooms.map(r => 
-    `Phòng:${r.roomName}|SL:${r.capacity}`
-  ).join('\n');
+  if (targetCourses.length === 0) {
+    return { report: "Hoàn tất: Không còn lớp nào cần xếp.", suggestions: [] };
+  }
+
+  // Lấy tối đa 300 lớp mỗi lượt để đảm bảo AI xử lý được trong 1 lần suy luận
+  const batch = targetCourses.slice(0, 300);
+
+  // 2. Tạo bản đồ "Slot trống" cho từng phòng
+  const roomOccupancy: Record<string, Set<string>> = {};
+  courses.forEach(c => {
+    const rName = c.suggestedRoom || c.room;
+    if (rName && rName.toLowerCase() !== 'null' && c.validationStatus === 'verified') {
+      if (!roomOccupancy[rName]) roomOccupancy[rName] = new Set();
+      roomOccupancy[rName].add(`${c.dayOfWeek}_${c.period}`);
+    }
+  });
+
+  // Tóm tắt các phòng bận (đã được nén)
+  const roomsSummary = rooms.map(r => {
+    const occupied = Array.from(roomOccupancy[r.roomName] || []);
+    return `${r.roomName}(Cap:${r.capacity})[Bận:${occupied.join(',')}]`;
+  }).join('|');
+
+  // 3. Nén danh sách TARGET cực độ
+  const targetText = batch.map(c => `${c.stt}:${c.registeredCount}@T${c.dayOfWeek}:${c.period}`).join(' ');
 
   const prompt = `
-    Bạn là chuyên gia điều phối giảng đường đại học với thuật toán lặp thông minh.
-    
-    CHẾ ĐỘ CẤU HÌNH:
-    - Cho phép sửa phòng đã có (Override): ${allowOverride ? "CÓ" : "KHÔNG"}.
-    ${!allowOverride ? "- LƯU Ý: Những ô có dữ liệu 'Phòng' ban đầu (không phải NULL) là CỐ ĐỊNH, bạn KHÔNG ĐƯỢC phép đề xuất thay đổi. Chỉ được điền vào các ô NULL." : "- LƯU Ý: Bạn được phép đề xuất phòng mới cho TẤT CẢ các lớp để sửa lỗi và tối ưu hóa."}
+    TASK: UNIVERSITY TIMETABLE TURBO FILLER (ITERATION ${iteration}).
+    GOAL: Fill as many TARGETS as possible. Aim for 200+ assignments.
 
-    DANH SÁCH LỖI CẦN SỬA (PHẢN HỒI TỪ CODE VALIDATOR):
-    ${previousErrors.length > 0 ? previousErrors.join('\n') : "Chưa có lỗi từ vòng lặp trước."}
-
-    YÊU CẦU:
-    1. LẤP ĐẦY Ô TRỐNG: Tất cả các lớp có Phòng='NULL' phải được gán phòng phù hợp.
-    2. SỬA LỖI VI PHẠM: Nếu có danh sách lỗi ở trên, hãy tìm phòng khác thay thế ngay lập tức.
-    3. NGUYÊN TẮC: ĐK (Số đăng ký) <= SL (Sức chứa). Không trùng Thứ/Tiết (trừ khi có 7tuandau/7tuansau).
-    4. Chỉ dùng phòng trong DANH SÁCH MASTER.
-
-    --- LỊCH HỌC (Ưu tiên cột ĐK) ---
-    ${coursesSummary}
-
-    --- DANH SÁCH PHÒNG MASTER ---
+    --- ROOMS DATA (NAME(CAP)[BUSY_SLOTS]) ---
     ${roomsSummary}
 
-    YÊU CẦU ĐẦU RA (JSON):
+    --- TARGET CLASSES (STT:REG_COUNT@DAY:PERIOD) ---
+    ${targetText}
+
+    STRICT RULES:
+    1. A class at T2:1-3 can ONLY be put in a room NOT busy at '2_1-3'.
+    2. Room Capacity >= Reg_Count.
+    3. BE AGGRESSIVE: If a room is free at that time, ASSIGN IT. 
+    4. RETURN AS MANY AS YOU CAN. If you skip a class, explain why in report.
+
+    RESPONSE FORMAT (JSON):
     {
-      "report": "Giải trình ngắn gọn các thay đổi bạn vừa thực hiện để sửa lỗi ở vòng lặp này.",
-      "suggestions": [{"stt": "STT", "room": "Tên phòng mới"}]
+      "report": "Short summary",
+      "results": { "STT": "ROOM_NAME", "STT": "ROOM_NAME", ... }
     }
+    (Use 'results' as a simple Key-Value map for maximum token efficiency).
   `;
 
   try {
     const response = await ai.models.generateContent({
       model: 'gemini-3-pro-preview',
       contents: prompt,
-      config: { responseMimeType: "application/json" }
+      config: { 
+        responseMimeType: "application/json",
+        thinkingConfig: { thinkingBudget: 32768 }
+      }
     });
     
-    const result = JSON.parse(response.text || '{}');
+    const rawResult = JSON.parse(response.text || '{}');
+    const suggestions: { stt: string | number, room: string }[] = [];
+    
+    if (rawResult.results) {
+      Object.entries(rawResult.results).forEach(([stt, room]) => {
+        suggestions.push({ stt, room: String(room) });
+      });
+    }
+
     return {
-      report: result.report || "Đã phân tích.",
-      suggestions: Array.isArray(result.suggestions) ? result.suggestions : []
+      report: rawResult.report || `Đã xử lý batch ${batch.length} lớp.`,
+      suggestions
     };
   } catch (error) {
-    console.error("Gemini Error:", error);
-    return { report: "Lỗi kết nối.", suggestions: [] };
+    console.error("Gemini Turbo Error:", error);
+    return { report: "Lỗi xử lý hàng loạt.", suggestions: [] };
   }
 };

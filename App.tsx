@@ -12,7 +12,8 @@ import {
   Home,
   Settings2,
   CheckCircle,
-  Loader2
+  Loader2,
+  RefreshCw
 } from 'lucide-react';
 import { CourseData, RoomData } from './types';
 import TimetableGrid from './components/TimetableGrid';
@@ -30,9 +31,9 @@ const App: React.FC = () => {
   const [aiAnalysis, setAiAnalysis] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'schedule' | 'rooms'>('schedule');
   
-  // New States
   const [allowOverride, setAllowOverride] = useState(false);
   const [iteration, setIteration] = useState(0);
+  const maxAttempts = 10; // Tăng số vòng lặp nhưng mỗi vòng sẽ nhanh hơn
 
   const handleFileUpload = (data: any[], name: string, type: 'course' | 'room') => {
     if (type === 'course') {
@@ -56,57 +57,64 @@ const App: React.FC = () => {
   const runAiAnalysis = async () => {
     if (courses.length === 0 || rooms.length === 0) return;
     setIsAnalyzing(true);
-    setAiAnalysis("Đang khởi động chu kỳ phân tích...");
     
     let currentCourses = [...courses];
-    let maxAttempts = 3;
     let attempt = 0;
-    let finalReport = "";
+    let fullLog = "";
 
     try {
       while (attempt < maxAttempts) {
         attempt++;
         setIteration(attempt);
-        setAiAnalysis(`Vòng lặp ${attempt}/${maxAttempts}: AI đang tính toán phương án...`);
+        
+        // 1. Kiểm định trạng thái hiện tại
+        currentCourses = validateAISuggestions(currentCourses, rooms);
+        
+        const needsWork = currentCourses.filter(c => 
+          c.validationStatus === 'violated' || 
+          c.validationStatus === 'original_violated' || 
+          (!c.room || c.room.toLowerCase() === 'null' || c.room.trim() === '')
+        );
 
-        // Gửi danh sách lỗi hiện tại (nếu có) để AI biết đường sửa
-        const currentErrors = currentCourses
-          .filter(c => c.validationStatus === 'violated' || (allowOverride && c.validationStatus === 'original_violated'))
-          .map(c => `STT ${c.stt}: ${c.validationError}`);
+        if (needsWork.length === 0 && attempt > 1) {
+          fullLog = `[HOÀN TẤT] Hệ thống đã hội tụ thành công.\n` + fullLog;
+          setAiAnalysis(fullLog);
+          break;
+        }
 
-        const { report, suggestions } = await analyzeSchedule(currentCourses, rooms, allowOverride, currentErrors);
-        finalReport = report;
+        setAiAnalysis(`[Vòng ${attempt}] Đang xử lý ${needsWork.length} lớp còn lại...`);
 
-        // Cập nhật gợi ý từ AI
-        // Fix: Explicitly type nextCourses as CourseData[] to avoid inference issues where suggestedRoom is incorrectly seen as required
-        let nextCourses: CourseData[] = currentCourses.map(course => {
-          const suggestion = suggestions.find(s => String(s.stt) === String(course.stt));
-          return {
-            ...course,
-            suggestedRoom: suggestion ? suggestion.room : course.suggestedRoom
-          };
+        const { report, suggestions } = await analyzeSchedule(currentCourses, rooms, allowOverride, attempt);
+        
+        if (suggestions.length === 0) {
+          fullLog = `[Vòng ${attempt}] AI không tìm thấy thêm phương án. Dừng tại đây.\n` + fullLog;
+          setAiAnalysis(fullLog);
+          break;
+        }
+
+        // 2. Cập nhật gợi ý hàng loạt
+        const suggestionMap = new Map(suggestions.map(s => [String(s.stt), s.room]));
+        
+        currentCourses = currentCourses.map(course => {
+          const sugRoom = suggestionMap.get(String(course.stt));
+          if (sugRoom) {
+            const isOriginalEmpty = !course.room || course.room.toLowerCase() === 'null' || course.room.trim() === '';
+            if (allowOverride || isOriginalEmpty) {
+              return { ...course, suggestedRoom: sugRoom };
+            }
+          }
+          return course;
         });
 
-        // Code Validator kiểm tra lại ngay lập tức
-        nextCourses = validateAISuggestions(nextCourses, rooms);
-        
-        // Kiểm tra xem còn lỗi "AI Sai" (violated) không?
-        const hasAiViolations = nextCourses.some(c => c.validationStatus === 'violated');
-        
-        currentCourses = nextCourses;
+        // 3. Re-validate
+        currentCourses = validateAISuggestions(currentCourses, rooms);
         setCourses([...currentCourses]);
-
-        if (!hasAiViolations) {
-          setAiAnalysis(`Thành công rực rỡ! AI đã tìm được phương án không lỗi sau ${attempt} lần thử.\n\n${finalReport}`);
-          break; 
-        }
-
-        if (attempt === maxAttempts) {
-          setAiAnalysis(`Đã đạt giới hạn ${maxAttempts} lần thử. Một số lỗi phức tạp vẫn tồn tại, vui lòng kiểm tra thủ công.\n\n${finalReport}`);
-        }
+        
+        fullLog = `[Vòng ${attempt}] Xếp được ${suggestions.length} lớp. ${report}\n` + fullLog;
+        setAiAnalysis(fullLog);
       }
     } catch (error) {
-      setAiAnalysis("Lỗi hệ thống trong quá trình lặp. Vui lòng thử lại.");
+      setAiAnalysis("Lỗi trong chu trình hội tụ turbo.");
     } finally {
       setIsAnalyzing(false);
     }
@@ -128,8 +136,8 @@ const App: React.FC = () => {
               <IconDashboard className="w-5 h-5" />
             </div>
             <div>
-              <h1 className="text-md font-black leading-none uppercase tracking-tighter">UniTime <span className="text-indigo-400">Hybrid</span></h1>
-              <p className="text-[9px] text-slate-400 mt-1 uppercase font-bold tracking-widest italic italic">AI-Driven Optimization Loop</p>
+              <h1 className="text-md font-black leading-none uppercase tracking-tighter">UniTime <span className="text-indigo-400">Turbo</span></h1>
+              <p className="text-[9px] text-slate-400 mt-1 uppercase font-bold tracking-widest italic">High-Density Batch Processing</p>
             </div>
           </div>
           
@@ -146,7 +154,7 @@ const App: React.FC = () => {
                   />
                   <div className="w-9 h-5 bg-slate-700 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-500"></div>
                 </div>
-                <span className="text-[10px] font-black uppercase tracking-widest text-slate-300">Cho phép sửa phòng đã xếp</span>
+                <span className="text-[10px] font-black uppercase tracking-widest text-slate-300">Ghi đè lịch cũ</span>
               </label>
             </div>
           </div>
@@ -157,11 +165,11 @@ const App: React.FC = () => {
         {!isDataReady && (
           <div className="py-12 flex flex-col items-center text-center space-y-8">
             <div className="inline-flex items-center gap-2 bg-indigo-50 text-indigo-600 px-4 py-1.5 rounded-full text-[11px] font-black uppercase tracking-widest border border-indigo-100 mb-2 animate-bounce">
-              <IconSparkles className="w-3 h-3" />
-              Chu trình lặp thông minh tự sửa lỗi
+              <RefreshCw className="w-3 h-3" />
+              Batch processing: 200+ classes / round
             </div>
             <div className="bg-white p-10 rounded-[48px] shadow-2xl shadow-indigo-100 border border-slate-100 max-w-3xl w-full">
-              <h2 className="text-4xl font-black text-slate-800 mb-4 tracking-tighter italic">Hệ thống Điều phối Giảng đường</h2>
+              <h2 className="text-4xl font-black text-slate-800 mb-4 tracking-tighter italic">Quản lý Giảng đường Thông minh</h2>
               <div className="grid md:grid-cols-2 gap-6 mt-8">
                 <FileUploader type="course" label="Lịch giảng dạy (.xlsx)" fileName={courseFileName} count={courses.length} onUpload={handleFileUpload} onRemove={() => removeFile('course')} />
                 <FileUploader type="room" label="Danh sách phòng (.xlsx)" fileName={roomFileName} count={rooms.length} onUpload={handleFileUpload} onRemove={() => removeFile('room')} />
@@ -174,25 +182,25 @@ const App: React.FC = () => {
           <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
             <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
               <div className="bg-white p-5 rounded-3xl shadow-sm border border-slate-200">
-                <p className="text-[10px] text-slate-400 uppercase font-black tracking-widest">Đã xác minh</p>
+                <p className="text-[10px] text-slate-400 uppercase font-black tracking-widest">Hợp lệ (Verified)</p>
                 <div className="flex items-baseline gap-2 mt-1">
                   <p className="text-3xl font-black text-emerald-600">{verifiedCount}</p>
                   <IconShield className="w-4 h-4 text-emerald-500" />
                 </div>
               </div>
               <div className="bg-white p-5 rounded-3xl shadow-sm border border-slate-200">
-                <p className="text-[10px] text-slate-400 uppercase font-black tracking-widest">Chưa có phòng</p>
+                <p className="text-[10px] text-slate-400 uppercase font-black tracking-widest">Đang trống</p>
                 <div className="flex items-baseline gap-2 mt-1">
                   <p className={`text-3xl font-black ${unassignedCount > 0 ? 'text-amber-500' : 'text-slate-200'}`}>{unassignedCount}</p>
                   <HelpCircle className="w-4 h-4 text-amber-400" />
                 </div>
               </div>
               <div className="bg-white p-5 rounded-3xl shadow-sm border border-slate-200">
-                <p className="text-[10px] text-slate-400 uppercase font-black tracking-widest">Sai Gốc</p>
+                <p className="text-[10px] text-slate-400 uppercase font-black tracking-widest">Lỗi Gốc</p>
                 <p className={`text-3xl font-black mt-1 ${originalErrorCount > 0 ? 'text-amber-600' : 'text-slate-200'}`}>{originalErrorCount}</p>
               </div>
               <div className="bg-white p-5 rounded-3xl shadow-sm border border-slate-200">
-                <p className="text-[10px] text-slate-400 uppercase font-black tracking-widest text-red-400">AI Sai</p>
+                <p className="text-[10px] text-slate-400 uppercase font-black tracking-widest text-red-400">AI Vi phạm</p>
                 <p className={`text-3xl font-black mt-1 ${aiViolationCount > 0 ? 'text-red-600' : 'text-slate-200'}`}>{aiViolationCount}</p>
               </div>
               <button 
@@ -204,20 +212,20 @@ const App: React.FC = () => {
               >
                 <div className="flex items-center gap-2">
                   {isAnalyzing ? <Loader2 className="w-4 h-4 animate-spin" /> : <IconAnalyze className="w-4 h-4" />}
-                  <span className="text-xs">{isAnalyzing ? `ĐANG THỬ LẦN ${iteration}` : 'CHẠY VÒNG LẶP AI'}</span>
+                  <span className="text-xs">{isAnalyzing ? `BATCH ${iteration}/${maxAttempts}...` : 'BẮT ĐẦU HỘI TỤ'}</span>
                 </div>
                 <span className="text-[9px] opacity-70 uppercase tracking-tighter">
-                  {allowOverride ? 'Toàn quyền điều phối' : 'Chỉ điền ô trống'}
+                  Greedy Filling Mode
                 </span>
               </button>
             </div>
 
             <div className="bg-white rounded-[32px] shadow-xl border border-slate-200 overflow-hidden">
               <div className="flex border-b border-slate-100 bg-slate-50/50 p-2">
-                <button onClick={() => setActiveTab('schedule')} className={`px-8 py-3 text-[11px] font-black rounded-2xl transition-all ${activeTab === 'schedule' ? 'bg-indigo-600 text-white shadow-lg' : 'text-slate-400 hover:text-indigo-600'}`}>LỊCH HỌC & KIỂM ĐỊNH</button>
+                <button onClick={() => setActiveTab('schedule')} className={`px-8 py-3 text-[11px] font-black rounded-2xl transition-all ${activeTab === 'schedule' ? 'bg-indigo-600 text-white shadow-lg' : 'text-slate-400 hover:text-indigo-600'}`}>LỊCH TRÌNH & KIỂM ĐỊNH</button>
                 <button onClick={() => setActiveTab('rooms')} className={`px-8 py-3 text-[11px] font-black rounded-2xl ml-2 transition-all ${activeTab === 'rooms' ? 'bg-indigo-600 text-white shadow-lg' : 'text-slate-400 hover:text-indigo-600'}`}>DANH SÁCH PHÒNG</button>
                 <div className="flex-1" />
-                <button onClick={() => { setCourses([]); setRooms([]); setAiAnalysis(null); setCourseFileName(null); setRoomFileName(null); setIteration(0); }} className="text-[10px] font-bold text-slate-400 px-6 hover:text-red-500 transition-colors uppercase tracking-widest">Xóa dữ liệu</button>
+                <button onClick={() => { setCourses([]); setRooms([]); setAiAnalysis(null); setCourseFileName(null); setRoomFileName(null); setIteration(0); }} className="text-[10px] font-bold text-slate-400 px-6 hover:text-red-500 transition-colors uppercase tracking-widest">Làm mới</button>
               </div>
               <div className="p-0 overflow-hidden">
                 {activeTab === 'schedule' ? <TimetableGrid data={courses} /> : <RoomGrid data={rooms} />}
@@ -225,12 +233,14 @@ const App: React.FC = () => {
             </div>
 
             {aiAnalysis && (
-              <div className="bg-white border border-slate-200 rounded-[32px] shadow-sm overflow-hidden p-8">
+              <div className="bg-slate-900 border border-slate-800 rounded-[32px] shadow-2xl overflow-hidden p-8">
                 <div className="flex items-center gap-3 mb-6">
-                  <IconSparkles className="w-5 h-5 text-indigo-600" />
-                  <h3 className="text-sm font-black uppercase tracking-widest text-slate-800">Nhật ký Phân tích & Tự sửa lỗi</h3>
+                  <div className="p-2 bg-indigo-500/20 rounded-xl">
+                    <IconSparkles className="w-5 h-5 text-indigo-400" />
+                  </div>
+                  <h3 className="text-sm font-black uppercase tracking-widest text-white">Log Hội tụ Trí tuệ Nhân tạo</h3>
                 </div>
-                <div className="text-xs text-slate-600 whitespace-pre-wrap font-medium border-l-2 border-indigo-100 pl-6 leading-relaxed">
+                <div className="text-[11px] text-slate-400 font-mono whitespace-pre-wrap max-h-60 overflow-y-auto custom-scrollbar leading-relaxed">
                   {aiAnalysis}
                 </div>
               </div>
