@@ -203,25 +203,56 @@ const App: React.FC = () => {
 
       <main className="flex-1 max-w-7xl mx-auto w-full p-6 space-y-6">
         {!isDataReady ? (
-          <div className="py-20 flex flex-col items-center">
-             <div className="bg-white p-12 rounded-[64px] shadow-2xl shadow-indigo-100 border border-slate-100 max-w-2xl w-full text-center group">
-                <div className="w-24 h-24 bg-gradient-to-br from-indigo-600 to-blue-500 rounded-[32px] mx-auto flex items-center justify-center mb-10 shadow-2xl shadow-indigo-200">
-                   <FileSpreadsheet className="w-12 h-12 text-white" />
-                </div>
-                <h2 className="text-5xl font-black text-slate-800 mb-4 tracking-tighter">Hệ thống <span className="text-indigo-600">Lập lịch</span></h2>
-                <p className="text-slate-400 text-lg mb-8 font-medium italic">Xếp lịch bằng logic cứng (deterministic) - Không dùng AI</p>
+          <div className="py-12 flex flex-col items-center gap-12">
+             <div className="bg-white p-16 rounded-[64px] shadow-2xl shadow-indigo-100/50 border border-slate-100 max-w-3xl w-full text-center relative overflow-hidden">
+                <div className="absolute top-0 left-0 w-full h-2 bg-gradient-to-r from-indigo-500 via-purple-500 to-blue-500" />
                 
-                <button 
-                  onClick={runTurboProcess}
-                  disabled={!isDataReady || isAnalyzing}
-                  className="mb-8 px-8 py-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-[24px] font-black text-sm uppercase tracking-widest shadow-xl shadow-indigo-200 transition-all flex items-center gap-3 mx-auto disabled:opacity-50"
-                >
-                  <Zap className="w-5 h-5" /> {isAnalyzing ? 'Đang xếp lịch...' : 'Xếp lịch ngay'}
-                </button>
+                <div className="w-28 h-28 bg-gradient-to-br from-indigo-600 to-blue-500 rounded-[36px] mx-auto flex items-center justify-center mb-10 shadow-2xl shadow-indigo-200 rotate-3 hover:rotate-0 transition-transform duration-500">
+                   <FileSpreadsheet className="w-14 h-14 text-white" />
+                </div>
+                
+                <h2 className="text-6xl font-black text-slate-900 mb-6 tracking-tighter">
+                  UniTime <span className="text-indigo-600">Scheduler</span>
+                </h2>
+                <p className="text-slate-500 text-xl mb-12 font-medium max-w-lg mx-auto leading-relaxed">
+                  Giải pháp tự động tối ưu hóa phòng học và lịch giảng dạy chuyên nghiệp.
+                </p>
+                
+                <div className="flex flex-col items-center gap-6">
+                   <div className="flex items-center gap-4 text-slate-400 font-bold uppercase tracking-[0.2em] text-[10px]">
+                      <div className="h-px w-12 bg-slate-200" />
+                      Bắt đầu bằng cách tải dữ liệu
+                      <div className="h-px w-12 bg-slate-200" />
+                   </div>
+                   
+                   <div className="grid md:grid-cols-2 gap-6 w-full">
+                      <FileUploader type="course" label="Lịch giảng dạy" fileName={courseFileName} count={courses.length} onUpload={handleFileUpload} onRemove={() => {setCourses([]); setCourseFileName(null);}} />
+                      <FileUploader type="room" label="Danh sách phòng" fileName={roomFileName} count={rooms.length} onUpload={handleFileUpload} onRemove={() => {setRooms([]); setRoomFileName(null);}} />
+                   </div>
+                </div>
+             </div>
 
-                <div className="grid md:grid-cols-2 gap-8">
-                   <FileUploader type="course" label="Lịch giảng dạy" fileName={courseFileName} count={courses.length} onUpload={handleFileUpload} onRemove={() => {setCourses([]); setCourseFileName(null);}} />
-                   <FileUploader type="room" label="Danh sách phòng" fileName={roomFileName} count={rooms.length} onUpload={handleFileUpload} onRemove={() => {setRooms([]); setRoomFileName(null);}} />
+             <div className="grid grid-cols-1 md:grid-cols-3 gap-8 max-w-4xl w-full">
+                <div className="bg-white/50 p-8 rounded-[40px] border border-white shadow-sm flex flex-col items-center text-center gap-4">
+                   <div className="w-12 h-12 rounded-2xl bg-emerald-100 flex items-center justify-center">
+                      <IconShield className="w-6 h-6 text-emerald-600" />
+                   </div>
+                   <h3 className="font-black text-slate-800 uppercase tracking-widest text-xs">Chính xác</h3>
+                   <p className="text-slate-500 text-sm">Đảm bảo không trùng lịch, đúng sức chứa phòng.</p>
+                </div>
+                <div className="bg-white/50 p-8 rounded-[40px] border border-white shadow-sm flex flex-col items-center text-center gap-4">
+                   <div className="w-12 h-12 rounded-2xl bg-indigo-100 flex items-center justify-center">
+                      <Zap className="w-6 h-6 text-indigo-600" />
+                   </div>
+                   <h3 className="font-black text-slate-800 uppercase tracking-widest text-xs">Tốc độ</h3>
+                   <p className="text-slate-500 text-sm">Xử lý hàng ngàn lớp học chỉ trong vài giây.</p>
+                </div>
+                <div className="bg-white/50 p-8 rounded-[40px] border border-white shadow-sm flex flex-col items-center text-center gap-4">
+                   <div className="w-12 h-12 rounded-2xl bg-amber-100 flex items-center justify-center">
+                      <Wrench className="w-6 h-6 text-amber-600" />
+                   </div>
+                   <h3 className="font-black text-slate-800 uppercase tracking-widest text-xs">Tùy biến</h3>
+                   <p className="text-slate-500 text-sm">Dễ dàng điều chỉnh và xuất dữ liệu Excel.</p>
                 </div>
              </div>
           </div>
